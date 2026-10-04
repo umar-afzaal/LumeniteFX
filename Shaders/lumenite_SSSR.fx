@@ -46,7 +46,8 @@
 uniform bool SMOOTH_SHADING <
     ui_label = "Smooth Shading";
     ui_tooltip = "Slightly smoothens the raw normals. Turn OFF if SMOOTH_NORMALS is enabled in Kernel.";
-> = 1;
+    hidden = true;
+> = 0;
 
 uniform float DEPTH_BOUNDARY <
     ui_type = "slider";
@@ -113,7 +114,12 @@ uniform float TAIL_FEATHERING <
     ui_tooltip = "";
 > = 0.0;
 
-
+uniform float FOG_BLOCK <
+    ui_type = "drag";
+    ui_min = 0.0; ui_max = 1.0;
+    ui_label = "Fog Awareness";
+    ui_tooltip = "How much to suppress the effect inside fog. 0 = off.\nRequires FOG_MASK set to 1 in Kernel.";
+> = 1.0;
 
 /*--------------.
 | :: IMPORTS :: |
@@ -130,6 +136,12 @@ namespace Kernel {
 
     texture2D tDepth { Width = BUFFER_WIDTH; Height = BUFFER_HEIGHT; Format = R16F; MipLevels = 4; };
     sampler2D sDepth { Texture = tDepth; };
+
+    texture2D tFogMask { Width = BUFFER_WIDTH; Height = BUFFER_HEIGHT; Format = R16F; };
+    sampler2D sFogMask { Texture = tFogMask; };
+
+    texture2D tFogState { Width = 2; Height = 1; Format = RGBA32F; };
+    sampler2D sFogState { Texture = tFogState; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
 }
 
 namespace LumeniteSSSR {
@@ -154,6 +166,14 @@ float CalculateDepthFade(float depth)
     float fadeStartDepth = DEPTH_BOUNDARY * DEPTH_FADE_START;
     float fadeRange = DEPTH_BOUNDARY - fadeStartDepth;
     return 1.0 - saturate((depth - fadeStartDepth) / fadeRange);
+}
+
+float GetFogMask(float2 uv)
+{
+    float stamp = tex2Dlod(Kernel::sFogState, float4(0.75, 0.5, 0, 0)).x;
+    bool fogActive = (stamp == float((FRAME_COUNT & 0xFFFFFu) + 1u)) || (stamp == float(((FRAME_COUNT - 1u) & 0xFFFFFu) + 1u));
+    [branch] if (!fogActive || FOG_BLOCK == 0.0) return 0.0;
+    return saturate(tex2Dlod(Kernel::sFogMask, float4(uv, 0, 0)).r * FOG_BLOCK);
 }
 
 float3 CalculateSmoothNormal(float2 uv, float4 gbuffer, int dilation, sampler SrcSampler)
@@ -339,6 +359,8 @@ float4 PS_ToDisplay(VSOUT input) : SV_Target
     spec *= depthFade;
     spec *= fresnel;
     float reflectionMask = saturate(length(spec) + fresnel * 0.5);
+    spec *= 1.0 - GetFogMask(input.uv);            //reflected light crosses the same fog as the surface: keep its transmitted part
+    reflectionMask *= 1.0 - GetFogMask(input.uv); //darken only the surface's share of the pixel, not the fog in front
     float3 conservationBase = base * (1.0 - reflectionMask * 0.7 * depthFade);
     return float4(ToOutputColorspace(conservationBase + spec, false), 1.0);
 }

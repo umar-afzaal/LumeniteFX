@@ -45,6 +45,26 @@
 
 #define RES_SCALE ((BUFFER_HEIGHT) / 2160.0) //DO NOT modify this
 
+#ifndef FOG_MASK
+    #define FOG_MASK 0
+#endif
+
+#ifndef CEIL_DIV
+    #define CEIL_DIV(x, g) (((x) + (g) - 1) / (g))
+#endif
+
+//1/4 working grid and the 4x4 reduction chain built on it
+#define FOG_GRID_W  CEIL_DIV(BUFFER_WIDTH, 4)
+#define FOG_GRID_H  CEIL_DIV(BUFFER_HEIGHT, 4)
+#define REDUCE1_W   CEIL_DIV(FOG_GRID_W, 4)
+#define REDUCE1_H   CEIL_DIV(FOG_GRID_H, 4)
+#define REDUCE2_W   CEIL_DIV(REDUCE1_W, 4)
+#define REDUCE2_H   CEIL_DIV(REDUCE1_H, 4)
+#define REDUCE3_W   CEIL_DIV(REDUCE2_W, 4)
+#define REDUCE3_H   CEIL_DIV(REDUCE2_H, 4)
+#define REDUCE4_W   CEIL_DIV(REDUCE3_W, 4) //<= 8 up to 8K, read whole by the final pass
+#define REDUCE4_H   CEIL_DIV(REDUCE3_H, 4)
+
 /*--------------.
 | :: HEADERS :: |
 '--------------*/
@@ -52,6 +72,7 @@
 // #if DEBUG_KERNEL
 //     #include "DrawText.fxh"
 // #endif
+#include "./include/lumenite_ColorManagement.fxh"
 #include "./include/lumenite_Projections.fxh"
 #include "./include/lumenite_Helpers.fxh"
 #include "./include/lumenite_Compute.fxh"
@@ -67,6 +88,8 @@
                    "Optical Flow\0"
                    "Motion Vectors\0"
                    "Motion Confidence\0"
+                   "Fog Mask\0"
+                   "Dehaze Preview\0"
                    ;
         ui_label = "Debug View";
         ui_category = "Kernel";
@@ -155,6 +178,58 @@ sampler2D sPrevFrameFlow { Texture = tPrevFrameFlow; MagFilter = POINT; MinFilte
 
 texture2D tPrevConfidence { Width = BUFFER_WIDTH/8; Height = BUFFER_HEIGHT/8; Format = R16F; };
 sampler2D sPrevConfidence { Texture = tPrevConfidence; };
+
+//r: dark channel of color (working space), g: raw dark channel (display-linear, airlight key)
+texture2D tDarkChannel         { Width = FOG_GRID_W; Height = FOG_GRID_H; Format = RG16F; };
+sampler2D sDarkChannel         { Texture = tDarkChannel; AddressU = CLAMP; AddressV = CLAMP; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
+//brightest pixel of each 4x4 block (display-linear), the airlight candidate color
+texture2D tBrightestColor      { Width = FOG_GRID_W; Height = FOG_GRID_H; Format = RGBA16F; };
+sampler2D sBrightestColor      { Texture = tBrightestColor; AddressU = CLAMP; AddressV = CLAMP; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
+texture2D tDarkChannelRowMin   { Width = FOG_GRID_W; Height = FOG_GRID_H; Format = RG16F; };
+sampler2D sDarkChannelRowMin   { Texture = tDarkChannelRowMin; AddressU = CLAMP; AddressV = CLAMP; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
+//r: transmission after temporal (guided filter input), g: patch-min airlight key
+texture2D tTransmission        { Width = FOG_GRID_W; Height = FOG_GRID_H; Format = RG16F; };
+sampler2D sTransmission        { Texture = tTransmission; AddressU = CLAMP; AddressV = CLAMP; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
+//guided filter moments (I, p, I*I, I*p): 32F tex was necessary here
+texture2D tGuideMoments        { Width = FOG_GRID_W; Height = FOG_GRID_H; Format = RGBA32F; };
+sampler2D sGuideMoments        { Texture = tGuideMoments; AddressU = CLAMP; AddressV = CLAMP; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
+texture2D tGuideMomentsRowMean { Width = FOG_GRID_W; Height = FOG_GRID_H; Format = RGBA32F; };
+sampler2D sGuideMomentsRowMean { Texture = tGuideMomentsRowMean; AddressU = CLAMP; AddressV = CLAMP; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
+//guided filter coefficients (a, b)
+texture2D tGuideCoeffs         { Width = FOG_GRID_W; Height = FOG_GRID_H; Format = RG16F; };
+sampler2D sGuideCoeffs         { Texture = tGuideCoeffs; AddressU = CLAMP; AddressV = CLAMP; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
+texture2D tGuideCoeffsRowMean  { Width = FOG_GRID_W; Height = FOG_GRID_H; Format = RG16F; };
+sampler2D sGuideCoeffsRowMean  { Texture = tGuideCoeffsRowMean; AddressU = CLAMP; AddressV = CLAMP; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
+texture2D tGuideCoeffsMean     { Width = FOG_GRID_W; Height = FOG_GRID_H; Format = RG16F; };
+sampler2D sGuideCoeffsMean     { Texture = tGuideCoeffsMean; AddressU = CLAMP; AddressV = CLAMP; MagFilter = LINEAR; MinFilter = LINEAR; MipFilter = LINEAR; };
+//reduction chain: rgba = (candidate color, key), rg = (sum of haze, count)
+texture2D tReduceBest1         { Width = REDUCE1_W; Height = REDUCE1_H; Format = RGBA16F; };
+sampler2D sReduceBest1         { Texture = tReduceBest1; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
+texture2D tReduceSum1          { Width = REDUCE1_W; Height = REDUCE1_H; Format = RG32F; };
+sampler2D sReduceSum1          { Texture = tReduceSum1; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
+texture2D tReduceBest2         { Width = REDUCE2_W; Height = REDUCE2_H; Format = RGBA16F; };
+sampler2D sReduceBest2         { Texture = tReduceBest2; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
+texture2D tReduceSum2          { Width = REDUCE2_W; Height = REDUCE2_H; Format = RG32F; };
+sampler2D sReduceSum2          { Texture = tReduceSum2; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
+texture2D tReduceBest3         { Width = REDUCE3_W; Height = REDUCE3_H; Format = RGBA16F; };
+sampler2D sReduceBest3         { Texture = tReduceBest3; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
+texture2D tReduceSum3          { Width = REDUCE3_W; Height = REDUCE3_H; Format = RG32F; };
+sampler2D sReduceSum3          { Texture = tReduceSum3; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
+texture2D tReduceBest4         { Width = REDUCE4_W; Height = REDUCE4_H; Format = RGBA16F; };
+sampler2D sReduceBest4         { Texture = tReduceBest4; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
+texture2D tReduceSum4          { Width = REDUCE4_W; Height = REDUCE4_H; Format = RG32F; };
+sampler2D sReduceSum4          { Texture = tReduceSum4; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
+//texel 0: airlight (display-linear rgb) + mean haze D, texel 1: frame stamp + airlight-was-valid flag
+texture2D tFogState            { Width = 2; Height = 1; Format = RGBA32F; };
+sampler2D sFogState            { Texture = tFogState; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
+texture2D tPrevFogState        { Width = 2; Height = 1; Format = RGBA32F; };
+sampler2D sPrevFogState        { Texture = tPrevFogState; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
+
+texture2D tPrevHaze            { Width = FOG_GRID_W; Height = FOG_GRID_H; Format = R16F; };
+sampler2D sPrevHaze            { Texture = tPrevHaze; AddressU = CLAMP; AddressV = CLAMP; MagFilter = LINEAR; MinFilter = LINEAR; MipFilter = LINEAR; };
+
+texture2D tFogMask             { Width = BUFFER_WIDTH; Height = BUFFER_HEIGHT; Format = R16F; };
+sampler2D sFogMask             { Texture = tFogMask; };
 
 /*--------------.
 | :: HELPERS :: |
@@ -448,6 +523,76 @@ float2 UpscaleFlow(sampler2D coarseSrc, sampler2D currLumaSrc, sampler2D prevLum
     subpixelOffset = clamp(subpixelOffset, -0.5, 0.5);
 
     return (prediction+subpixelOffset*texelSize);
+}
+
+
+
+static const int    PATCH_RADIUS = (9 * BUFFER_HEIGHT + 1080) / 2160;
+static const int    GUIDE_RADIUS = (27 * BUFFER_HEIGHT + 1080) / 2160;
+static const float2 GRID_SIZE    = float2(FOG_GRID_W, FOG_GRID_H);
+static const float2 GRID_TEXEL   = 1.0 / float2(FOG_GRID_W, FOG_GRID_H);
+static const float2 FULL_TO_GRID = BUFFER_SCREEN_SIZE / (4.0 * float2(FOG_GRID_W, FOG_GRID_H)); //block centers line up when W, H are not multiples of 4
+static const float  HIGHLIGHT_CLIP_LEVEL = 0.98; //display-linear level above which a block can never be the airlight
+
+float MinComponent(float3 value) { return min(value.x, min(value.y, value.z)); }
+float MaxComponent(float3 value) { return max(value.x, max(value.y, value.z)); }
+
+float2 GridToFullUV(float2 gridPos) { return (floor(gridPos) * 4.0 + 2.0) * BUFFER_PIXEL_SIZE; } //center of the 4x4
+float2 FullToGridUV(float2 uv)   { return uv * FULL_TO_GRID; }
+
+//frame stamps: (frame & 0xFFFFF) + 1 is exact in fp32 and never 0
+float FrameStamp(uint frame) { return float((frame & 0xFFFFFu) + 1u); }
+
+float4 ReadFogState(sampler2D stateSource, int texel)
+{
+    return tex2Dlod(stateSource, float4((float(texel) + 0.5) * 0.5, 0.5, 0, 0));
+}
+
+bool IsStateFromLastFrame()
+{
+    return ReadFogState(sFogState, 1).x == FrameStamp(FRAME_COUNT - 1u);
+}
+
+bool IsHistoryUsable()
+{
+    float4 stampTexel = ReadFogState(sFogState, 1);
+    return (stampTexel.x == FrameStamp(FRAME_COUNT - 1u)) && (stampTexel.y > 0.5); //trust history only if last frame ran AND its dark channel was normalized by a real airlight
+}
+
+float3 GetAirlight()
+{
+    float4 state    = ReadFogState(sFogState, 0);
+    bool   isFresh  = IsStateFromLastFrame() && (MaxComponent(state.rgb) > 0.0);
+    float3 airlight = isFresh ? state.rgb : float3(1.0, 1.0, 1.0);
+    airlight = min(airlight, HIGHLIGHT_CLIP_LEVEL * GetMaxColorValue()); //keeps the inverse tonemap finite
+    return max(airlight, 0.001);
+}
+
+float ComputeTransmission(float2 uv)
+{
+    float2 coeffs       = tex2Dlod(sGuideCoeffsMean, float4(FullToGridUV(uv), 0, 0)).xy;
+    float  guideLuma    = tex2Dlod(Kernel::sCurrLuma, float4(uv, 0, 0)).r;
+    float  transmission = saturate(mad(coeffs.x, guideLuma, coeffs.y));
+    return transmission;
+}
+
+void ReduceBlock(sampler2D bestSource, sampler2D sumSource, int2 sourceSize, float2 gridPos, out float4 best, out float2 total)
+{
+    best  = float4(0.0, 0.0, 0.0, -1.0);
+    total = float2(0.0, 0.0);
+    int2 blockOrigin = int2(gridPos) * 4;
+    [unroll] for (int y = 0; y < 4; y++)
+    [unroll] for (int x = 0; x < 4; x++)
+    {
+        int2   tapPos     = blockOrigin + int2(x, y);
+        bool   isValid    = all(tapPos < sourceSize);
+        float2 tapUV      = (float2(tapPos) + 0.5) / float2(sourceSize);
+        float4 candidate  = tex2Dlod(bestSource, float4(tapUV, 0, 0));
+        float2 partialSum = tex2Dlod(sumSource, float4(tapUV, 0, 0)).xy;
+        bool   isBetter   = isValid && (candidate.a > best.a);
+        best   = isBetter ? candidate : best;
+        total += isValid ? partialSum : float2(0.0, 0.0);
+    }
 }
 
 /*--------------.
@@ -842,6 +987,218 @@ float PS_StoreLuma(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
     return tex2D(sCurrLuma, uv).r;
 }
 
+
+
+
+void PS_DarkChannel(float4 pos : SV_Position, float2 uv : TEXCOORD, out float2 darkChannel : SV_Target0, out float4 brightest : SV_Target1)
+{
+    float2 blockOrigin    = floor(pos.xy) * 4.0;
+    float3 minColor       = 1e6;
+    float3 brightestColor = 0.0;
+    float  brightestLuma  = -1.0;
+    [unroll] for (int y = 0; y < 4; y++)
+    [unroll] for (int x = 0; x < 4; x++)
+    {
+        float2 tapUV    = (blockOrigin + float2(x, y) + 0.5) * BUFFER_PIXEL_SIZE;
+        float3 tapColor = tex2Dlod(ReShade::BackBuffer, float4(tapUV, 0, 0)).rgb;
+        minColor = min(minColor, tapColor);
+        float tapLuma    = dot(tapColor, float3(0.2126, 0.7152, 0.0722));
+        bool  isBrighter = tapLuma > brightestLuma;
+        brightestColor = isBrighter ? tapColor : brightestColor;
+        brightestLuma = isBrighter ? tapLuma : brightestLuma;
+    }
+    float3 minLinear       = max(ToLinearColorspace(minColor, false), 0.0);
+    float3 brightestLinear = max(ToLinearColorspace(brightestColor, false), 0.0);
+    float3 airlight        = GetAirlight();
+    float  rawDark         = MinComponent(minLinear);
+    float  airlightKey     = (rawDark >= HIGHLIGHT_CLIP_LEVEL * GetMaxColorValue()) ? 0.0 : rawDark; //clipped highlights never become airlight
+    darkChannel   = float2(MinComponent(minLinear / airlight), airlightKey); //dark channel of I/A
+    brightest = float4(brightestLinear, 1.0);
+}
+
+float2 PS_PatchMinHorizontal(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
+{
+    float2 patchMin = tex2Dlod(sDarkChannel, float4(uv, 0, 0)).rg;
+    [unroll] for (int i = 1; i <= PATCH_RADIUS; i++)
+    {
+        float2 tapOffset = float2(float(i) * GRID_TEXEL.x, 0.0);
+        patchMin = min(patchMin, min(tex2Dlod(sDarkChannel, float4(uv + tapOffset, 0, 0)).rg, tex2Dlod(sDarkChannel, float4(uv - tapOffset, 0, 0)).rg));
+    }
+    return patchMin;
+}
+
+void PS_PatchMinVertical(float4 pos : SV_Position, float2 uv : TEXCOORD, out float2 transmissionOut : SV_Target0, out float4 moments : SV_Target1)
+{
+    float2 patchMin = tex2Dlod(sDarkChannelRowMin, float4(uv, 0, 0)).rg;
+    [unroll] for (int i = 1; i <= PATCH_RADIUS; i++)
+    {
+        float2 tapOffset = float2(0.0, float(i) * GRID_TEXEL.y);
+        patchMin = min(patchMin, min(tex2Dlod(sDarkChannelRowMin, float4(uv + tapOffset, 0, 0)).rg, tex2Dlod(sDarkChannelRowMin, float4(uv - tapOffset, 0, 0)).rg));
+    }
+    float haze          = saturate(0.95 * patchMin.x); //HAZE_RETENTION = 0.95 per He et al.
+    float2 blockUV      = GridToFullUV(pos.xy);
+    float2 flow         = tex2Dlod(Kernel::sFlow, float4(blockUV, 0, 0)).xy;
+    float  confidence   = tex2Dlod(Kernel::sConfidence, float4(blockUV, 0, 0)).x;
+    float2 prevUV       = blockUV + flow;
+    float  historyHaze  = tex2Dlod(sPrevHaze, float4(FullToGridUV(prevUV), 0, 0)).x;
+    bool   historyValid = !IsOOB(prevUV) && (historyHaze > 0.0) && IsHistoryUsable();
+    haze = lerp(haze, historyHaze, historyValid ? 0.9 * saturate(confidence) : 0.0); //TEMPORAL_STABILITY = 0.9
+
+    float transmission = 1.0 - haze;
+    float guideLuma    = tex2Dlod(Kernel::sCurrLuma, float4(blockUV, 0, 2)).r; //mip 2 = 4x4 box mean = guide on the 1/4 grid
+    transmissionOut    = float2(transmission, patchMin.y);
+    moments = float4(guideLuma, transmission, guideLuma * guideLuma, guideLuma * transmission);
+}
+
+void PS_ReduceAirlight1(float4 pos : SV_Position, float2 uv : TEXCOORD, out float4 best : SV_Target0, out float2 total : SV_Target1)
+{
+    best  = float4(0.0, 0.0, 0.0, -1.0);
+    total = float2(0.0, 0.0);
+    int2 blockOrigin = int2(pos.xy) * 4;
+    [unroll] for (int y = 0; y < 4; y++)
+    [unroll] for (int x = 0; x < 4; x++)
+    {
+        int2   tapPos          = blockOrigin + int2(x, y);
+        bool   isValid         = all(tapPos < int2(FOG_GRID_W, FOG_GRID_H));
+        float2 tapUV           = (float2(tapPos) + 0.5) * GRID_TEXEL;
+        float2 transmissionKey = tex2Dlod(sTransmission, float4(tapUV, 0, 0)).xy;
+        float3 candidateColor  = tex2Dlod(sBrightestColor, float4(tapUV, 0, 0)).rgb;
+        bool   isBetter        = isValid && (transmissionKey.y > best.a);
+        best   = isBetter ? float4(candidateColor, transmissionKey.y) : best;
+        total += isValid ? float2(1.0 - transmissionKey.x, 1.0) : float2(0.0, 0.0);
+    }
+}
+
+void PS_ReduceAirlight2(float4 pos : SV_Position, float2 uv : TEXCOORD, out float4 best : SV_Target0, out float2 total : SV_Target1)
+{
+    ReduceBlock(sReduceBest1, sReduceSum1, int2(REDUCE1_W, REDUCE1_H), pos.xy, best, total);
+}
+
+void PS_ReduceAirlight3(float4 pos : SV_Position, float2 uv : TEXCOORD, out float4 best : SV_Target0, out float2 total : SV_Target1)
+{
+    ReduceBlock(sReduceBest2, sReduceSum2, int2(REDUCE2_W, REDUCE2_H), pos.xy, best, total);
+}
+
+void PS_ReduceAirlight4(float4 pos : SV_Position, float2 uv : TEXCOORD, out float4 best : SV_Target0, out float2 total : SV_Target1)
+{
+    ReduceBlock(sReduceBest3, sReduceSum3, int2(REDUCE3_W, REDUCE3_H), pos.xy, best, total);
+}
+
+float4 PS_ResolveFogState(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
+{
+    float4 prevStampTexel   = ReadFogState(sPrevFogState, 1);
+    bool   isFresh          = prevStampTexel.x == FrameStamp(FRAME_COUNT - 1u);
+    bool   prevDensityValid = isFresh && (prevStampTexel.y > 0.5); //last frame's density came from a real airlight
+    if (pos.x >= 1.0) return float4(FrameStamp(FRAME_COUNT), isFresh ? 1.0 : 0.0, 0.0, 0.0); //texel 1: stamp, airlight-was-valid
+
+    float4 best  = float4(0.0, 0.0, 0.0, -1.0);
+    float2 total = float2(0.0, 0.0);
+    [unroll] for (int y = 0; y < 8; y++)
+    [unroll] for (int x = 0; x < 8; x++)
+    {
+        int2   tapPos     = int2(x, y);
+        bool   isValid    = all(tapPos < int2(REDUCE4_W, REDUCE4_H));
+        float2 tapUV      = (float2(tapPos) + 0.5) / float2(REDUCE4_W, REDUCE4_H);
+        float4 candidate  = tex2Dlod(sReduceBest4, float4(tapUV, 0, 0));
+        float2 partialSum = tex2Dlod(sReduceSum4, float4(tapUV, 0, 0)).xy;
+        bool   isBetter   = isValid && (candidate.a > best.a);
+        best   = isBetter ? candidate : best;
+        total += isValid ? partialSum : float2(0.0, 0.0);
+    }
+    float3 airlight = (best.a >= 0.0) ? best.rgb : float3(1.0, 1.0, 1.0);
+    airlight = min(airlight, HIGHLIGHT_CLIP_LEVEL * GetMaxColorValue());
+    float  density = total.x / max(total.y, 1.0);
+
+    float4 prevState     = ReadFogState(sPrevFogState, 0);
+    float  smoothing     = 1.0 - exp(-FRAME_TIME / 500.0); //Airlight Adaptation (ms) = 500.0
+    float  airlightAlpha = isFresh ? smoothing : 1.0; //airlight key does not depend on A: valid from the first frame
+    float  densityAlpha  = prevDensityValid ? smoothing : 1.0; //density does: restart once a real airlight is in use
+    return float4(lerp(prevState.rgb, airlight, airlightAlpha), lerp(prevState.a, density, densityAlpha));
+}
+
+float4 PS_GuideMomentsHorizontal(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
+{
+    float4 momentSum = 0.0;
+    float  tapCount  = 0.0;
+    [unroll] for (int i = -GUIDE_RADIUS; i <= GUIDE_RADIUS; i++)
+    {
+        float  tapX       = pos.x + float(i);
+        bool   isValid    = (tapX > 0.0) && (tapX < GRID_SIZE.x);
+        float4 tapMoments = tex2Dlod(sGuideMoments, float4(tapX * GRID_TEXEL.x, uv.y, 0, 0));
+        momentSum += isValid ? tapMoments : float4(0.0, 0.0, 0.0, 0.0);
+        tapCount  += isValid ? 1.0 : 0.0;
+    }
+    return momentSum / tapCount;
+}
+
+float2 PS_GuideCoeffs(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
+{
+    float4 momentSum = 0.0;
+    float  tapCount  = 0.0;
+    [unroll] for (int i = -GUIDE_RADIUS; i <= GUIDE_RADIUS; i++)
+    {
+        float  tapY       = pos.y + float(i);
+        bool   isValid    = (tapY > 0.0) && (tapY < GRID_SIZE.y);
+        float4 tapMoments = tex2Dlod(sGuideMomentsRowMean, float4(uv.x, tapY * GRID_TEXEL.y, 0, 0));
+        momentSum += isValid ? tapMoments : float4(0.0, 0.0, 0.0, 0.0);
+        tapCount  += isValid ? 1.0 : 0.0;
+    }
+    float4 meanMoments     = momentSum / tapCount;
+    float  guideVariance   = max(meanMoments.z - meanMoments.x * meanMoments.x, 0.0);
+    float  guideCovariance = meanMoments.w - meanMoments.x * meanMoments.y;
+    float  slope           = guideCovariance / (guideVariance + 0.00025); //GUIDE_EPSILON = 0.00025 equals He et al.'s 1e-3 on Kernel's luma range
+    return float2(slope, meanMoments.y - slope * meanMoments.x);
+}
+
+float2 PS_GuideCoeffsHorizontal(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
+{
+    float2 coeffSum = 0.0;
+    float  tapCount = 0.0;
+    [unroll] for (int i = -GUIDE_RADIUS; i <= GUIDE_RADIUS; i++)
+    {
+        float  tapX      = pos.x + float(i);
+        bool   isValid   = (tapX > 0.0) && (tapX < GRID_SIZE.x);
+        float2 tapCoeffs = tex2Dlod(sGuideCoeffs, float4(tapX * GRID_TEXEL.x, uv.y, 0, 0)).xy;
+        coeffSum += isValid ? tapCoeffs : float2(0.0, 0.0);
+        tapCount += isValid ? 1.0 : 0.0;
+    }
+    return coeffSum / tapCount;
+}
+
+float2 PS_GuideCoeffsVertical(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
+{
+    float2 coeffSum = 0.0;
+    float  tapCount = 0.0;
+    [unroll] for (int i = -GUIDE_RADIUS; i <= GUIDE_RADIUS; i++)
+    {
+        float  tapY      = pos.y + float(i);
+        bool   isValid   = (tapY > 0.0) && (tapY < GRID_SIZE.y);
+        float2 tapCoeffs = tex2Dlod(sGuideCoeffsRowMean, float4(uv.x, tapY * GRID_TEXEL.y, 0, 0)).xy;
+        coeffSum += isValid ? tapCoeffs : float2(0.0, 0.0);
+        tapCount += isValid ? 1.0 : 0.0;
+    }
+    return coeffSum / tapCount;
+}
+
+float PS_FogMask(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
+{
+    float transmission = ComputeTransmission(uv);
+    return (1.0 - transmission);
+}
+
+float PS_StoreHaze(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
+{
+    return max(1.0 - tex2Dlod(sTransmission, float4(uv, 0, 0)).x, 0.0001); //never 0: 0 is empty history
+}
+
+float4 PS_StoreFogState(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
+{
+    return tex2Dlod(sFogState, float4(uv, 0, 0));
+}
+
+
+
+
 #if DEBUG_KERNEL
     float4 PS_Debug(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
     {
@@ -911,6 +1268,7 @@ float PS_StoreLuma(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
                 // view = lerp(view, float3(1.0, 1.0, 1.0), saturate(labelMask)); //white labels
                 return float4(view, 1.0);
             }
+
             case 1: {
                 float4 gbuffer = tex2D(sNormals, uv);
                 float3 normal = gbuffer.rgb;
@@ -923,8 +1281,11 @@ float PS_StoreLuma(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
                     dbg = float4(DepthGradient(depth, uv), 1.0); //right: depth gradient
                 return dbg;
             }
+
             case 2:  return float4(MotionToColor(tex2D(sFlow, uv).xy), 1);
+
             case 3:  return DrawMotionVectors(uv);
+
             case 4:
             {
                 float confidence = tex2D(sConfidence, uv).x;
@@ -935,6 +1296,18 @@ float PS_StoreLuma(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
                     confidenceColor = lerp(float3(1.0, 1.0, 0.0), float3(0.0, 1.0, 0.0), (confidence - 0.5) * 2.0);
                 return float4(lerp(sceneColor, confidenceColor, 0.9), 1.0);
             }
+
+            case 5: return float4(tex2Dlod(sFogMask, float4(uv, 0, 0)).rrr, 1.0);
+
+            case 6:
+            {
+                float3 airlight     = max(min(ReadFogState(sFogState, 0).rgb, HIGHLIGHT_CLIP_LEVEL * GetMaxColorValue()), 0.001);
+                float3 workingColor = max(ToLinearColorspace(sceneColor, false), 0.0);
+                float  transmission = ComputeTransmission(uv);
+                float3 dehazed      = max((workingColor - airlight) / max(transmission, 0.1) + airlight, 0.0);
+                return float4(ToOutputColorspace(dehazed, false), 1.0);
+            }
+
             default: return float4(sceneColor, 1.0);
         }
     }
@@ -983,6 +1356,28 @@ technique Lumenite_Kernel <
 
     pass { VertexShader = PostProcessVS; PixelShader = PS_StoreFlow; RenderTarget0 = tPrevFrameFlow; RenderTarget1 = tPrevConfidence; }
     pass { VertexShader = PostProcessVS; PixelShader = PS_StoreLuma; RenderTarget  = tPrevLuma;                                       }
+
+    //dcp fog mask
+    #if FOG_MASK
+        pass { VertexShader = PostProcessVS;  PixelShader = PS_DarkChannel;             RenderTarget0 = tDarkChannel;          RenderTarget1 = tBrightestColor; }
+        pass { VertexShader = PostProcessVS;  PixelShader = PS_PatchMinHorizontal;      RenderTarget  = tDarkChannelRowMin; }
+        pass { VertexShader = PostProcessVS;  PixelShader = PS_PatchMinVertical;        RenderTarget0 = tTransmission;         RenderTarget1 = tGuideMoments; }
+
+        pass { VertexShader = PostProcessVS;  PixelShader = PS_ReduceAirlight1;         RenderTarget0 = tReduceBest1;          RenderTarget1 = tReduceSum1; }
+        pass { VertexShader = PostProcessVS;  PixelShader = PS_ReduceAirlight2;         RenderTarget0 = tReduceBest2;          RenderTarget1 = tReduceSum2; }
+        pass { VertexShader = PostProcessVS;  PixelShader = PS_ReduceAirlight3;         RenderTarget0 = tReduceBest3;          RenderTarget1 = tReduceSum3; }
+        pass { VertexShader = PostProcessVS;  PixelShader = PS_ReduceAirlight4;         RenderTarget0 = tReduceBest4;          RenderTarget1 = tReduceSum4; }
+        pass { VertexShader = PostProcessVS;  PixelShader = PS_ResolveFogState;         RenderTarget  = tFogState; }
+
+        pass { VertexShader = PostProcessVS;  PixelShader = PS_GuideMomentsHorizontal;  RenderTarget  = tGuideMomentsRowMean; }
+        pass { VertexShader = PostProcessVS;  PixelShader = PS_GuideCoeffs;             RenderTarget  = tGuideCoeffs; }
+        pass { VertexShader = PostProcessVS;  PixelShader = PS_GuideCoeffsHorizontal;   RenderTarget  = tGuideCoeffsRowMean; }
+        pass { VertexShader = PostProcessVS;  PixelShader = PS_GuideCoeffsVertical;     RenderTarget  = tGuideCoeffsMean; }
+
+        pass { VertexShader = PostProcessVS;  PixelShader = PS_FogMask;                 RenderTarget  = tFogMask; }
+        pass { VertexShader = PostProcessVS;  PixelShader = PS_StoreHaze;               RenderTarget  = tPrevHaze; }
+        pass { VertexShader = PostProcessVS;  PixelShader = PS_StoreFogState;           RenderTarget  = tPrevFogState; }
+    #endif
 
     //debug views
 #if DEBUG_KERNEL

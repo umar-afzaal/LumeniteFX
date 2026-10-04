@@ -77,6 +77,13 @@ uniform float AO_INTENSITY <
     ui_category = "Ambient Occlusion";
 > = 1.0;
 
+uniform float FOG_BLOCK <
+    ui_type = "drag";
+    ui_min = 0.0; ui_max = 1.0;
+    ui_label = "Fog Awareness";
+    ui_tooltip = "How much to suppress the effect inside fog. 0 = off.\nRequires FOG_MASK set to 1 in Kernel.";
+> = 1.0;
+
 //deprecated
 // uniform int USER_GUIDE <
 // ui_type = "radio";
@@ -100,6 +107,12 @@ namespace Kernel {
 
     texture2D tDepth { Width = BUFFER_WIDTH; Height = BUFFER_HEIGHT; Format = R16F; MipLevels = 4; };
     sampler2D sDepth { Texture = tDepth; };
+
+    texture2D tFogMask { Width = BUFFER_WIDTH; Height = BUFFER_HEIGHT; Format = R16F; };
+    sampler2D sFogMask { Texture = tFogMask; };
+
+    texture2D tFogState { Width = 2; Height = 1; Format = RGBA32F; };
+    sampler2D sFogState { Texture = tFogState; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
 }
 
 namespace LumeniteRTAO {
@@ -151,6 +164,16 @@ float CalculateDepthFade(float depth)
     float fadeStartDepth = DEPTH_BOUNDARY * DEPTH_FADE_START;
     float fadeRange = DEPTH_BOUNDARY - fadeStartDepth;
     return 1.0 - saturate((depth - fadeStartDepth) / fadeRange);
+}
+
+float GetFogBlock(float2 uv)
+{
+    float stamp = tex2Dlod(Kernel::sFogState, float4(0.75, 0.5, 0, 0)).x;
+    bool fogActive = (stamp == float((FRAME_COUNT & 0xFFFFFu) + 1u)) || (stamp == float(((FRAME_COUNT - 1u) & 0xFFFFFu) + 1u));
+    float3 airlight = tex2Dlod(Kernel::sFogState, float4(0.25, 0.5, 0, 0)).rgb;
+    float  autoGain = clamp(GetLuminance(airlight) / max(GetLuminance(GetLinearColor(uv, false)), EPSILON), 0.0, 10.0);
+    float  fogShare = tex2Dlod(Kernel::sFogMask, float4(uv, 0, 0)).r * autoGain;
+    return fogActive ? saturate(fogShare * FOG_BLOCK) : 0.0;
 }
 
 float2 ATrousFilter(sampler SourceSampler, float2 uv, uint dilation)
@@ -277,6 +300,7 @@ float4 PS_ToDisplay(VSOUT input) : SV_Target
     }
     if (depth == 0 || depth >= DEPTH_BOUNDARY) discard;
     float3 base = GetLinearColor(input.uv, true);
+    ao = lerp(ao, 1.0, GetFogBlock(input.uv));
     base *= ao;
     return float4(ToOutputColorspace(base, true), 1.0);
 }
