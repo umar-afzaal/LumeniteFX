@@ -17,7 +17,7 @@
 
 
         Filename   : lumenite_LSAO.fx
-        Version    : 2026.06.09
+        Version    : 2026.10.05
         Author     : Afzaal (Kaidō)
         Description: Large-Scale Ray Traced Ambient Occlusion (Screen Space).
         License    : AGNYA License (https://github.com/nvb-uy/AGNYA-License)

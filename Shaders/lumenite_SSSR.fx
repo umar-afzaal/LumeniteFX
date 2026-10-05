@@ -16,7 +16,7 @@
         Discord    : https://discord.gg/deXJrW2dx6
 
         Filename   : lumenite_SSSR.fx
-        Version    : 2026.09.06
+        Version    : 2026.10.05
         Author     : Afzaal (Kaidō)
         Description: Stochastic Screen Space Reflections.
         License    : AGNYA License (https://github.com/nvb-uy/AGNYA-License)
@@ -168,12 +168,12 @@ float CalculateDepthFade(float depth)
     return 1.0 - saturate((depth - fadeStartDepth) / fadeRange);
 }
 
-float GetFogMask(float2 uv)
+float GetFogBlock(float2 uv, float3 sceneColor)
 {
     float stamp = tex2Dlod(Kernel::sFogState, float4(0.75, 0.5, 0, 0)).x;
     bool fogActive = (stamp == float((FRAME_COUNT & 0xFFFFFu) + 1u)) || (stamp == float(((FRAME_COUNT - 1u) & 0xFFFFFu) + 1u));
     [branch] if (!fogActive || FOG_BLOCK == 0.0) return 0.0;
-    return saturate(tex2Dlod(Kernel::sFogMask, float4(uv, 0, 0)).r * FOG_BLOCK);
+    return saturate(tex2Dlod(Kernel::sFogMask, float4(uv, 0, 0)).r * clamp(GetLuminance(tex2Dlod(Kernel::sFogState, float4(0.25, 0.5, 0, 0)).rgb) / max(GetLuminance(sceneColor), EPSILON), 0.0, 10.0) * FOG_BLOCK);
 }
 
 float3 CalculateSmoothNormal(float2 uv, float4 gbuffer, int dilation, sampler SrcSampler)
@@ -359,8 +359,9 @@ float4 PS_ToDisplay(VSOUT input) : SV_Target
     spec *= depthFade;
     spec *= fresnel;
     float reflectionMask = saturate(length(spec) + fresnel * 0.5);
-    spec *= 1.0 - GetFogMask(input.uv);            //reflected light crosses the same fog as the surface: keep its transmitted part
-    reflectionMask *= 1.0 - GetFogMask(input.uv); //darken only the surface's share of the pixel, not the fog in front
+    float fogBlock = GetFogBlock(input.uv, base);
+    spec *= 1.0 - fogBlock;            //reflected light crosses the same fog as the surface: keep its transmitted part
+    reflectionMask *= 1.0 - fogBlock;  //darken only the surface's share of the pixel, not the fog in front
     float3 conservationBase = base * (1.0 - reflectionMask * 0.7 * depthFade);
     return float4(ToOutputColorspace(conservationBase + spec, false), 1.0);
 }

@@ -17,7 +17,7 @@
 
 
         Filename   : lumenite_RTAO.fx
-        Version    : 2026.05.30
+        Version    : 2026.10.05
         Author     : Afzaal (Kaidō)
         Description: Ray Traced Ambient Occlusion (Screen Space).
         License    : AGNYA License (https://github.com/nvb-uy/AGNYA-License)
