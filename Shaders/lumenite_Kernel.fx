@@ -17,7 +17,7 @@
 
 
         Filename   : lumenite_Kernel.fx
-        Version    : 2026.10.05
+        Version    : 2026.10.17
         Author     : Afzaal (Kaidō)
         Description: Pre-effect for various LumeniteFX shaders.
         License    : AGNYA License (https://github.com/nvb-uy/AGNYA-License)
@@ -129,6 +129,23 @@ sampler2D sConfidence { Texture = tConfidence; };
 texture tNormals { Width = BUFFER_WIDTH; Height = BUFFER_HEIGHT; Format = RGBA16F; MipLevels = 4; };
 sampler sNormals { Texture = tNormals; };
 
+texture2D tDepth { Width = BUFFER_WIDTH; Height = BUFFER_HEIGHT; Format = R16F; MipLevels = 4; };
+sampler2D sDepth { Texture = tDepth; };
+
+texture2D tCurrLuma { Width = BUFFER_WIDTH; Height = BUFFER_HEIGHT; Format = R16F; MipLevels = 8; };
+sampler2D sCurrLuma { Texture = tCurrLuma; MagFilter = LINEAR; MinFilter = LINEAR; MipFilter = LINEAR; AddressU = CLAMP; AddressV = CLAMP; AddressW = CLAMP; };
+
+texture2D tPrevLuma { Width = BUFFER_WIDTH; Height = BUFFER_HEIGHT; Format = R16F; MipLevels = 8; };
+sampler2D sPrevLuma { Texture = tPrevLuma; MagFilter = LINEAR; MinFilter = LINEAR; MipFilter = LINEAR; AddressU = CLAMP; AddressV = CLAMP; AddressW = CLAMP; };
+
+//texel 0: airlight (display-linear rgb) + mean haze D, texel 1: frame stamp + airlight-was-valid flag
+texture2D tFogState            { Width = 2; Height = 1; Format = RGBA32F; };
+sampler2D sFogState            { Texture = tFogState; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
+
+texture2D tFogMask             { Width = BUFFER_WIDTH; Height = BUFFER_HEIGHT; Format = R16F; };
+sampler2D sFogMask             { Texture = tFogMask; };
+
+namespace Normals {
 #if IMAGE_SPACE == 0
     #if SMOOTH_NORMALS
         texture tGuideNormals { Width = BUFFER_WIDTH; Height = BUFFER_HEIGHT; Format = RGBA16F; };
@@ -142,16 +159,9 @@ sampler sNormals { Texture = tNormals; };
         sampler sHRAN_HB   { Texture = texHRAN_HB; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
     #endif
 #endif
+}
 
-texture2D tDepth { Width = BUFFER_WIDTH; Height = BUFFER_HEIGHT; Format = R16F; MipLevels = 4; };
-sampler2D sDepth { Texture = tDepth; };
-
-texture2D tCurrLuma { Width = BUFFER_WIDTH; Height = BUFFER_HEIGHT; Format = R16F; MipLevels = 8; };
-sampler2D sCurrLuma { Texture = tCurrLuma; MagFilter = LINEAR; MinFilter = LINEAR; MipFilter = LINEAR; AddressU = CLAMP; AddressV = CLAMP; AddressW = CLAMP; };
-
-texture2D tPrevLuma { Width = BUFFER_WIDTH; Height = BUFFER_HEIGHT; Format = R16F; MipLevels = 8; };
-sampler2D sPrevLuma { Texture = tPrevLuma; MagFilter = LINEAR; MinFilter = LINEAR; MipFilter = LINEAR; AddressU = CLAMP; AddressV = CLAMP; AddressW = CLAMP; };
-
+namespace Flow {
 texture2D tFlow128 { Width = BUFFER_WIDTH/128; Height = BUFFER_HEIGHT/128; Format = RG16F; };
 sampler2D sFlow128 { Texture = tFlow128; MagFilter = POINT; MinFilter = POINT; AddressU = CLAMP; AddressV = CLAMP; AddressW = CLAMP; };
 
@@ -178,7 +188,9 @@ sampler2D sPrevFrameFlow { Texture = tPrevFrameFlow; MagFilter = POINT; MinFilte
 
 texture2D tPrevConfidence { Width = BUFFER_WIDTH/8; Height = BUFFER_HEIGHT/8; Format = R16F; };
 sampler2D sPrevConfidence { Texture = tPrevConfidence; };
+}
 
+namespace Fog {
 //r: dark channel of color (working space), g: raw dark channel (display-linear, airlight key)
 texture2D tDarkChannel         { Width = FOG_GRID_W; Height = FOG_GRID_H; Format = RG16F; };
 sampler2D sDarkChannel         { Texture = tDarkChannel; AddressU = CLAMP; AddressV = CLAMP; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
@@ -219,17 +231,12 @@ texture2D tReduceBest4         { Width = REDUCE4_W; Height = REDUCE4_H; Format =
 sampler2D sReduceBest4         { Texture = tReduceBest4; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
 texture2D tReduceSum4          { Width = REDUCE4_W; Height = REDUCE4_H; Format = RG32F; };
 sampler2D sReduceSum4          { Texture = tReduceSum4; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
-//texel 0: airlight (display-linear rgb) + mean haze D, texel 1: frame stamp + airlight-was-valid flag
-texture2D tFogState            { Width = 2; Height = 1; Format = RGBA32F; };
-sampler2D sFogState            { Texture = tFogState; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
 texture2D tPrevFogState        { Width = 2; Height = 1; Format = RGBA32F; };
 sampler2D sPrevFogState        { Texture = tPrevFogState; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
 
 texture2D tPrevHaze            { Width = FOG_GRID_W; Height = FOG_GRID_H; Format = R16F; };
 sampler2D sPrevHaze            { Texture = tPrevHaze; AddressU = CLAMP; AddressV = CLAMP; MagFilter = LINEAR; MinFilter = LINEAR; MipFilter = LINEAR; };
-
-texture2D tFogMask             { Width = BUFFER_WIDTH; Height = BUFFER_HEIGHT; Format = R16F; };
-sampler2D sFogMask             { Texture = tFogMask; };
+}
 
 /*--------------.
 | :: HELPERS :: |
@@ -239,6 +246,7 @@ float3 GetColor(float2 uv)
     return tex2Dlod(ReShade::BackBuffer, float4(uv, 0, 0)).rgb;
 }
 
+namespace Debug {
 float3 DepthGradient(float t, float2 uv)
 {
     //grayscale: close=dark, far=bright
@@ -339,7 +347,9 @@ float4 DrawMotionVectors(float2 uv)
     outColor        = lerp(outColor, bestColor, bestCov);  //arrows on top
     return float4(outColor, 1.0);
 }
+}
 
+namespace Flow {
 float ZMSAD(sampler2D currLumaSrc, sampler2D prevLumaSrc, float2 posA, float2 posB, float2 texelSize, uint mip)
 {
     static const int2 offsets[9] = {
@@ -510,35 +520,35 @@ float2 UpscaleFlow(sampler2D coarseSrc, sampler2D currLumaSrc, sampler2D prevLum
         }
     }
 
-    //refinement with parabolic fitting
+    //sub-pixel refinement with parabolic fitting
     float costLeft   = ZMSAD(currLumaSrc, prevLumaSrc, uv, uv + prediction - float2(texelSize.x, 0), texelSize, mip);
     float costRight  = ZMSAD(currLumaSrc, prevLumaSrc, uv, uv + prediction + float2(texelSize.x, 0), texelSize, mip);
     float costDown   = ZMSAD(currLumaSrc, prevLumaSrc, uv, uv + prediction - float2(0, texelSize.y), texelSize, mip);
     float costUp     = ZMSAD(currLumaSrc, prevLumaSrc, uv, uv + prediction + float2(0, texelSize.y), texelSize, mip);
-    //sub-pixel offset (parabolic fitting)
-    float2 subpixelOffset;
-    subpixelOffset.x = (costLeft - costRight) / (4.0 * (costLeft + costRight - 2.0 * minCost) + EPSILON); //EPSILON for flat surface handling
-    subpixelOffset.y = (costDown - costUp)    / (4.0 * (costDown + costUp    - 2.0 * minCost) + EPSILON);
-    //clamp offset to a reasonable range
-    subpixelOffset = clamp(subpixelOffset, -0.5, 0.5);
+    float2 curvature = max(float2(costLeft + costRight, costDown + costUp) - 2.0 * minCost, 0.01 * minCost);
+    float2 subpixelOffset = float2(costLeft - costRight, costDown - costUp) / (2.0 * curvature);
+    subpixelOffset = clamp(subpixelOffset, -0.5, 0.5); //clamp offset to a reasonable range
 
-    return (prediction+subpixelOffset*texelSize);
+    //keep the fit only where its match is better than the tournament winner's
+    float2 refined = prediction + subpixelOffset * texelSize;
+    float  refinedCost = ZMSAD(currLumaSrc, prevLumaSrc, uv, uv + refined, texelSize, mip);
+    return (refinedCost < minCost) ? refined : prediction;
+}
 }
 
-
-
-static const int    PATCH_RADIUS = (9 * BUFFER_HEIGHT + 1080) / 2160;
-static const int    GUIDE_RADIUS = (27 * BUFFER_HEIGHT + 1080) / 2160;
-static const float2 GRID_SIZE    = float2(FOG_GRID_W, FOG_GRID_H);
-static const float2 GRID_TEXEL   = 1.0 / float2(FOG_GRID_W, FOG_GRID_H);
-static const float2 FULL_TO_GRID = BUFFER_SCREEN_SIZE / (4.0 * float2(FOG_GRID_W, FOG_GRID_H)); //block centers line up when W, H are not multiples of 4
-static const float  HIGHLIGHT_CLIP_LEVEL = 0.98; //display-linear level above which a block can never be the airlight
+namespace Fog {
+static const int    FOG_PATCH_RADIUS = (9 * BUFFER_HEIGHT + 1080) / 2160;
+static const int    FOG_GUIDE_RADIUS = (27 * BUFFER_HEIGHT + 1080) / 2160;
+static const float2 FOG_GRID_SIZE    = float2(FOG_GRID_W, FOG_GRID_H);
+static const float2 FOG_GRID_TEXEL   = 1.0 / float2(FOG_GRID_W, FOG_GRID_H);
+static const float2 FOG_FULL_TO_GRID = BUFFER_SCREEN_SIZE / (4.0 * float2(FOG_GRID_W, FOG_GRID_H)); //block centers line up when W, H are not multiples of 4
+static const float  FOG_HIGHLIGHT_CLIP_LEVEL = 0.98; //display-linear level above which a block can never be the airlight
 
 float MinComponent(float3 value) { return min(value.x, min(value.y, value.z)); }
 float MaxComponent(float3 value) { return max(value.x, max(value.y, value.z)); }
 
 float2 GridToFullUV(float2 gridPos) { return (floor(gridPos) * 4.0 + 2.0) * BUFFER_PIXEL_SIZE; } //center of the 4x4
-float2 FullToGridUV(float2 uv)   { return uv * FULL_TO_GRID; }
+float2 FullToGridUV(float2 uv)   { return uv * FOG_FULL_TO_GRID; }
 
 //frame stamps: (frame & 0xFFFFF) + 1 is exact in fp32 and never 0
 float FrameStamp(uint frame) { return float((frame & 0xFFFFFu) + 1u); }
@@ -564,7 +574,7 @@ float3 GetAirlight()
     float4 state    = ReadFogState(sFogState, 0);
     bool   isFresh  = IsStateFromLastFrame() && (MaxComponent(state.rgb) > 0.0);
     float3 airlight = isFresh ? state.rgb : float3(1.0, 1.0, 1.0);
-    airlight = min(airlight, HIGHLIGHT_CLIP_LEVEL * GetMaxColorValue()); //keeps the inverse tonemap finite
+    airlight = min(airlight, FOG_HIGHLIGHT_CLIP_LEVEL * GetMaxColorValue()); //keeps the inverse tonemap finite
     return max(airlight, 0.001);
 }
 
@@ -594,6 +604,146 @@ void ReduceBlock(sampler2D bestSource, sampler2D sumSource, int2 sourceSize, flo
         total += isValid ? partialSum : float2(0.0, 0.0);
     }
 }
+}
+
+namespace Normals {
+#if IMAGE_SPACE == 0
+    #if SMOOTH_NORMALS
+        static const float2 HRAN_SIZE = float2(BUFFER_WIDTH/2, BUFFER_HEIGHT/2);
+        static const float2 HRAN_PX = float2(2.0, 2.0) / float2(BUFFER_WIDTH, BUFFER_HEIGHT);
+        static const float  HRAN_TOL_SLOPE = 0.005 / RES_SCALE;
+        static const float  HRAN_TOL_FLOOR = 0.00005 / RES_SCALE;
+        static const float  HRAN_CURV_LO = 0.0;
+        static const float  HRAN_CURV_HI = 0.475;
+        static const float  HRAN_MERGE_CENTER_WEIGHT = 1.0;
+        static const float  HRAN_CURV_OPEN_WINDOW = 1.3333333;
+        static const float  HRAN_COHERENCE_LO = 0.86;
+        static const float  HRAN_COHERENCE_HI = 0.85;
+        static const float  HRAN_STRIDE_NEAR_REF = 0.12 * RES_SCALE;
+        static const float  HRAN_STRIDE_MAX = 24.0 * RES_SCALE;
+        static const float  HRAN_DETAIL_GAIN = 1.25 * RES_SCALE;
+        static const float  HRAN_DEPTH_TOL_SLOPE = 0.005;
+
+        float3 SafeNormalize(float3 v) { return v * rsqrt(max(dot(v, v), 1e-30)); } //a zero vector stays zero (normalize(0) is NaN on GL / Vulkan)
+
+        float NormalChord(float3 a, float3 b) { return sqrt(max(2.0 - 2.0 * dot(a, b), 0.0)); }
+
+        float SideFit(float depthMid, float depthEnd, float depthCenter, float3 arm) { return abs(2.0 * depthMid - depthEnd - depthCenter) * rsqrt(max(dot(arm, arm), 1e-30)); }
+
+        float SideWeight(float fit)
+        {
+            float weight = rcp(fit * fit + 0.0004);
+            return pow(weight, 2.0);
+        }
+
+        float3 AxisTangent(float3 tangentMinus, float3 tangentPlus, float weightMinus, float weightPlus, float3 centralTangent, float worstFit, float fadeLo, float fadeHi)
+        {
+            return lerp((tangentMinus * weightMinus + tangentPlus * weightPlus) / (weightMinus + weightPlus), centralTangent, 1.0 - smoothstep(fadeLo, fadeHi, worstFit));
+        }
+
+        float3 CentralTangent(float3 centralChord, float3 shortChord, float3 longChord, float bestFit)
+        {
+            return SafeNormalize(lerp(SafeNormalize(centralChord), SafeNormalize(8.0 * shortChord - longChord), smoothstep(0.03, 0.08, bestFit)));
+        }
+
+        bool HalfArmsInLine(float3 armMinus, float3 armPlus)
+        {
+            return dot(armMinus, armPlus) > 0.8660254 * sqrt(dot(armMinus, armMinus) * dot(armPlus, armPlus)) && max(dot(armMinus, armMinus), dot(armPlus, armPlus)) < 2.25 * min(dot(armMinus, armMinus), dot(armPlus, armPlus));
+        }
+
+        bool WideArmJumped(bool halfInLine, float3 armMinus, float3 armPlus)
+        {
+            return halfInLine && max(dot(armMinus, armMinus), dot(armPlus, armPlus)) > 9.0 * min(dot(armMinus, armMinus), dot(armPlus, armPlus));
+        }
+
+        float DepthRatio(float depth, float depthCenter) { return max(depth / depthCenter, depthCenter / max(depth, 1e-9)); }
+
+        float CurvatureDrop(float wideBestFit, float halfBestFit, float halfWorstFit, float noSilhouette)
+        {
+            return smoothstep(0.1, 0.2, wideBestFit) * (1.0 - smoothstep(0.6, 0.9, halfBestFit / max(wideBestFit, 1e-6))) * (1.0 - smoothstep(0.2, 0.4, halfWorstFit)) * noSilhouette;
+        }
+
+        float4 ATrousNormalsH(sampler2D gbufferSrc, float2 uv, uint dilation)
+        {
+            static const int2 crossOffsets[4] = {              int2(0,-1),
+                                                  int2(-1, 0),             int2(1, 0),
+                                                               int2(0, 1) };
+
+            float4 centerGeo = tex2Dlod(gbufferSrc, float4(uv, 0, 0));
+            float  detail = saturate(dot(fwidth(centerGeo.rgb), float3(1,1,1)) * HRAN_DETAIL_GAIN); //0 = facet interior/flat, 1 = dense variation
+            if (centerGeo.a >= 0.999) return centerGeo; //sky/far
+            float  strideScale    = clamp(HRAN_STRIDE_NEAR_REF * exp2(-detail) / max(centerGeo.a, 1e-5), RES_SCALE, HRAN_STRIDE_MAX); //world-locked footprint
+            float  ringRadius     = dilation * strideScale; //shared by the rotation gate and every tap
+            float  rotationAngle  = (ringRadius > 1.5) ? frac(GetStratifiedNoise(uv * HRAN_SIZE).x + float(dilation) * 0.6180339887) * 1.5707963268 : 0.0; //rotate the cross: band phase scrambled into grain the next pass averages away
+            float  rotationSin, rotationCos; sincos(rotationAngle, rotationSin, rotationCos);
+            float  invDepthTol    = 1.0 / (centerGeo.a * HRAN_DEPTH_TOL_SLOPE * sqrt(strideScale / RES_SCALE) + EPSILON); //slope term ~ z*sqrt(stride) covers curvature headroom
+            float  invDepthTolL2  = invDepthTol * 1.4426950408; //log2(e) prefold: exp(-x)==exp2(-x*log2e)
+            float3 armSum         = 0.0; //arms accumulate FIRST; the centre's weight is decided after,
+            float  armWeight      = 0.0; //once we know how many of them actually survived the gates
+            float4 ringSamples[4];
+            [unroll] for (int i = 0; i < 2; i++) {
+                float2 offsetIdeal = float2(crossOffsets[i]) * ringRadius; //full-res grid stride, depth-adaptive
+                float2 offsetPx    = float2(offsetIdeal.x * rotationCos - offsetIdeal.y * rotationSin, offsetIdeal.x * rotationSin + offsetIdeal.y * rotationCos);
+                offsetPx           = floor(offsetPx + 0.5); //texel snap
+                //border guard: scale the MIRRORED pair down so both taps stay on the half grid
+                float2 halfTexelPos = uv * HRAN_SIZE;
+                float2 borderRoom   = max(min(halfTexelPos, HRAN_SIZE - 1.0 - halfTexelPos), 0.0);
+                float  borderScale  = min(1.0, min(borderRoom.x / max(abs(offsetPx.x), 1e-3), borderRoom.y / max(abs(offsetPx.y), 1e-3)));
+                offsetPx            = floor(offsetPx * borderScale + 0.5);
+                float2 sampleUV     = uv + offsetPx * HRAN_PX;
+                ringSamples[i]     = tex2Dlod(gbufferSrc, float4(sampleUV, 0, 0)); //one fetch = signal + both guides
+                ringSamples[3 - i] = tex2Dlod(gbufferSrc, float4(uv - offsetPx * HRAN_PX, 0, 0)); //mirrored partner, same snapped offset
+            }
+
+            //curvature consistency
+            float3 secondDiffX = ringSamples[1].rgb + ringSamples[2].rgb - 2.0 * centerGeo.rgb;
+            float3 secondDiffY = ringSamples[0].rgb + ringSamples[3].rgb - 2.0 * centerGeo.rgb;
+            float  curvature   = (length(secondDiffX) + length(secondDiffY)) * 0.5;
+            bool   ringValid   = (ringSamples[0].a < 0.999) && (ringSamples[1].a < 0.999) && (ringSamples[2].a < 0.999) && (ringSamples[3].a < 0.999);
+            float  curvGate    = ringValid ? (1.0 - smoothstep(HRAN_CURV_LO, HRAN_CURV_HI, curvature)) : 0.0;
+            float  tapWindow   = lerp(1.3333333, HRAN_CURV_OPEN_WINDOW, curvGate);
+            //planar depth prediction
+            float  slopeEast  = ringSamples[2].a - centerGeo.a, slopeWest  = centerGeo.a - ringSamples[1].a; //E-C, C-W
+            float  slopeSouth = ringSamples[3].a - centerGeo.a, slopeNorth = centerGeo.a - ringSamples[0].a; //S-C, C-N
+            float  depthSlopeX = abs(slopeEast) < abs(slopeWest) ? slopeEast : slopeWest;
+            float  depthSlopeY = abs(slopeSouth) < abs(slopeNorth) ? slopeSouth : slopeNorth;
+            float  gradCap = 6.0 / invDepthTol;
+            depthSlopeX = clamp(depthSlopeX, -gradCap, gradCap);
+            depthSlopeY = clamp(depthSlopeY, -gradCap, gradCap);
+            [unroll] for (int i = 0; i < 4; i++) {
+                float4 sampleGeo    = ringSamples[i];
+                float  planeResid   = sampleGeo.a - (centerGeo.a + depthSlopeX * float(crossOffsets[i].x) + depthSlopeY * float(crossOffsets[i].y));
+                float  depthWeight  = exp2(-abs(planeResid) * invDepthTolL2); //point-to-plane: slanted floors and gentle kinks pass, depth discontinuities fail
+                float  normalAlign  = saturate(dot(centerGeo.rgb, sampleGeo.rgb));
+                float  normalWeight = saturate(normalAlign * tapWindow - (tapWindow - 1.0)); //angular window
+                float  weight       = depthWeight * normalWeight * 2.0; //uniform arm weight
+                weight              = sampleGeo.a >= 0.999 ? 0.0 : weight; //skip skylines
+                armSum             += sampleGeo.rgb * weight;
+                armWeight          += weight;
+            }
+
+            //adaptive center weight to the flicker on small geometry
+            float  armConf      = saturate(armWeight * 0.125); //8.0 = four arms x 2.0 max
+            float  centerWeight = lerp(4.0, HRAN_MERGE_CENTER_WEIGHT, armConf);
+            float3 sum          = centerGeo.rgb * centerWeight + armSum;
+            float  totalWeight  = centerWeight + armWeight;
+
+            float  filteredLen = length(sum);
+            float3 mergedDir   = (filteredLen > EPSILON) ? sum / filteredLen : centerGeo.rgb;
+
+            //coherence gate
+            float  coherence     = filteredLen / max(totalWeight, EPSILON);
+            float  coherenceGate = smoothstep(HRAN_COHERENCE_LO, HRAN_COHERENCE_HI, coherence);
+
+            float  mergeStrength = max(coherenceGate, curvGate);
+            float3 filtered      = normalize(lerp(centerGeo.rgb, mergedDir, mergeStrength));
+
+            return float4(filtered, centerGeo.a); //depth rides through untouched
+        }
+
+    #endif
+#endif
+}
 
 /*--------------.
 | :: SHADERS :: |
@@ -606,6 +756,7 @@ float PS_PackFeatures(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Targe
     return luma * rcp(1.0 + luma);
 }
 
+namespace Normals {
 #if IMAGE_SPACE == 0
     void PS_ReconstructNormals(VSOUT input, out float4 gbuffer : SV_Target0, out float depthC : SV_Target1)
     {
@@ -637,130 +788,82 @@ float PS_PackFeatures(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Targe
     }
 
     #if SMOOTH_NORMALS
-        static const float2 HRAN_SIZE = float2(BUFFER_WIDTH/2, BUFFER_HEIGHT/2);
-        static const float2 HRAN_PX = float2(2.0, 2.0) / float2(BUFFER_WIDTH, BUFFER_HEIGHT);
-        static const float  HRAN_TOL_SLOPE = 0.005 / RES_SCALE;
-        static const float  HRAN_TOL_FLOOR = 0.00005 / RES_SCALE;
-        static const float  CURV_LO = 0.0;
-        static const float  CURV_HI = 0.475;
-        static const float  MERGE_CENTER_WEIGHT = 1.0;
-        static const float  CURV_OPEN_WINDOW = 1.3333333;
-        static const float  COHERENCE_LO = 0.86;
-        static const float  COHERENCE_HI = 0.85;
-        static const float  STRIDE_NEAR_REF = 0.12 * RES_SCALE;
-        static const float  STRIDE_MAX = 24.0 * RES_SCALE;
-        static const float  DETAIL_GAIN = 1.25 * RES_SCALE;
-        static const float  DEPTH_TOL_SLOPE = 0.005;
-
         float4 PS_HRAN_Half(VSOUT input) : SV_Target
         {
-            float2 hc  = floor(input.uv * HRAN_SIZE);
-            float2 uvC = (hc * 2.0 + 0.5) * BUFFER_PIXEL_SIZE;
-            float  zC  = GetDepth(uvC);
-            if (zC >= 0.999) return float4(0.0, 0.0, -1.0, zC); //sky
+            float2 halfTexel = floor(input.uv * HRAN_SIZE);
+            float2 uvCenter  = (halfTexel * 2.0 + 0.5) * BUFFER_PIXEL_SIZE;
+            float  depthC    = GetDepth(uvCenter);
+            if (depthC >= 0.999) return float4(0.0, 0.0, -1.0, depthC); //sky
 
-            float  b = clamp(STRIDE_NEAR_REF * rcp(max(zC, 1e-5)), RES_SCALE, STRIDE_MAX) * 2.0; //half-px -> full px
+            float  armLength = clamp(HRAN_STRIDE_NEAR_REF * rcp(max(depthC, 1e-5)), RES_SCALE, HRAN_STRIDE_MAX) * 2.0; //half-px -> full px
             //border guard
-            float2 pxPos = uvC * BUFFER_SCREEN_SIZE;
-            float  bx = max(min(floor(b + 0.5), min(pxPos.x, BUFFER_SCREEN_SIZE.x - 1.0 - pxPos.x)), 1.0);
-            float  by = max(min(floor(b + 0.5), min(pxPos.y, BUFFER_SCREEN_SIZE.y - 1.0 - pxPos.y)), 1.0);
-            float2 offX = float2(bx, 0.0) * BUFFER_PIXEL_SIZE.x;
-            float2 offY = float2(0.0, by) * BUFFER_PIXEL_SIZE.y;
+            float2 pixelPos = uvCenter * BUFFER_SCREEN_SIZE;
+            float  armX     = max(min(floor(armLength + 0.5), floor(min(pixelPos.x, BUFFER_SCREEN_SIZE.x - 1.0 - pixelPos.x))), 1.0);
+            float  armY     = max(min(floor(armLength + 0.5), floor(min(pixelPos.y, BUFFER_SCREEN_SIZE.y - 1.0 - pixelPos.y))), 1.0);
+            float2 offsetX  = float2(armX, 0.0) * BUFFER_PIXEL_SIZE.x;
+            float2 offsetY  = float2(0.0, armY) * BUFFER_PIXEL_SIZE.y;
 
-            float3 pC = UVToViewSpace(uvC,        zC,                  input);
-            float3 pL = UVToViewSpace(uvC - offX, GetDepth(uvC - offX), input);
-            float3 pR = UVToViewSpace(uvC + offX, GetDepth(uvC + offX), input);
-            float3 pT = UVToViewSpace(uvC - offY, GetDepth(uvC - offY), input);
-            float3 pB = UVToViewSpace(uvC + offY, GetDepth(uvC + offY), input);
+            //three scales: the wide arms, the half arms, the quarter arms
+            float  depthLeftHalf    = GetDepth(uvCenter - offsetX * 0.5),  depthRightHalf    = GetDepth(uvCenter + offsetX * 0.5);
+            float  depthTopHalf     = GetDepth(uvCenter - offsetY * 0.5),  depthBottomHalf   = GetDepth(uvCenter + offsetY * 0.5);
+            float  depthLeftQuarter = GetDepth(uvCenter - offsetX * 0.25), depthRightQuarter = GetDepth(uvCenter + offsetX * 0.25);
+            float  depthTopQuarter  = GetDepth(uvCenter - offsetY * 0.25), depthBottomQuarter = GetDepth(uvCenter + offsetY * 0.25);
+            float3 posCenter        = UVToViewSpace(uvCenter,        depthC,                  input);
+            float3 posLeft          = UVToViewSpace(uvCenter - offsetX, GetDepth(uvCenter - offsetX), input);
+            float3 posRight         = UVToViewSpace(uvCenter + offsetX, GetDepth(uvCenter + offsetX), input);
+            float3 posTop           = UVToViewSpace(uvCenter - offsetY, GetDepth(uvCenter - offsetY), input);
+            float3 posBottom        = UVToViewSpace(uvCenter + offsetY, GetDepth(uvCenter + offsetY), input);
+            float3 posLeftHalf      = UVToViewSpace(uvCenter - offsetX * 0.5,  depthLeftHalf,      input), posRightHalf    = UVToViewSpace(uvCenter + offsetX * 0.5,  depthRightHalf,     input);
+            float3 posTopHalf       = UVToViewSpace(uvCenter - offsetY * 0.5,  depthTopHalf,       input), posBottomHalf   = UVToViewSpace(uvCenter + offsetY * 0.5,  depthBottomHalf,    input);
+            float3 posLeftQuarter   = UVToViewSpace(uvCenter - offsetX * 0.25, depthLeftQuarter,   input), posRightQuarter = UVToViewSpace(uvCenter + offsetX * 0.25, depthRightQuarter,  input);
+            float3 posTopQuarter    = UVToViewSpace(uvCenter - offsetY * 0.25, depthTopQuarter,    input), posBottomQuarter = UVToViewSpace(uvCenter + offsetY * 0.25, depthBottomQuarter, input);
 
-            //best-fit selection
-            float3 dX2 = pR - pC, dX1 = pC - pL;
-            float3 dY2 = pB - pC, dY1 = pC - pT;
-            float3 ddxV = dot(dX2, dX2) < dot(dX1, dX1) ? dX2 : dX1;
-            float3 ddyV = dot(dY2, dY2) < dot(dY1, dY1) ? dY2 : dY1;
+            //WIDE scale
+            float3 armLeft  = posCenter - posLeft,  armRight  = posRight - posCenter;
+            float3 armTop   = posCenter - posTop,   armBottom = posBottom - posCenter;
+            float  fitLeft  = SideFit(depthLeftHalf,   posLeft.z,   depthC, armLeft),  fitRight  = SideFit(depthRightHalf,  posRight.z,  depthC, armRight);
+            float  fitTop   = SideFit(depthTopHalf,    posTop.z,    depthC, armTop),   fitBottom = SideFit(depthBottomHalf, posBottom.z, depthC, armBottom);
+            float3 tangentLeft = SafeNormalize(3.0 * posCenter + posLeft - 4.0 * posLeftHalf), tangentRight  = SafeNormalize(4.0 * posRightHalf - 3.0 * posCenter - posRight);
+            float3 tangentTop  = SafeNormalize(3.0 * posCenter + posTop - 4.0 * posTopHalf),   tangentBottom = SafeNormalize(4.0 * posBottomHalf - 3.0 * posCenter - posBottom);
+            float3 wideTangentX = AxisTangent(tangentLeft, tangentRight, SideWeight(fitLeft), SideWeight(fitRight), CentralTangent(armLeft + armRight, posRightHalf - posLeftHalf, posRight - posLeft, min(fitLeft, fitRight)), max(fitLeft, fitRight), 0.1, 0.2);
+            float3 wideTangentY = AxisTangent(tangentTop, tangentBottom, SideWeight(fitTop), SideWeight(fitBottom), CentralTangent(armTop + armBottom, posBottomHalf - posTopHalf, posBottom - posTop, min(fitTop, fitBottom)), max(fitTop, fitBottom), 0.1, 0.2);
+            float3 wideNormal   = SafeNormalize(cross(wideTangentX, wideTangentY));
 
-            float3 n = cross(ddxV, ddyV);
-            n *= rsqrt(max(dot(n, n), 1e-30)); //scale-safe normalize
+            //HALF scale, the same one level down (a feature smaller than the arm)
+            float  halfFitLeft = SideFit(depthLeftQuarter, depthLeftHalf, depthC, posCenter - posLeftHalf), halfFitRight  = SideFit(depthRightQuarter,  depthRightHalf,  depthC, posRightHalf - posCenter);
+            float  halfFitTop  = SideFit(depthTopQuarter,  depthTopHalf,  depthC, posCenter - posTopHalf),  halfFitBottom = SideFit(depthBottomQuarter, depthBottomHalf, depthC, posBottomHalf - posCenter);
+            float3 halfTangentX = AxisTangent(SafeNormalize(3.0 * posCenter + posLeftHalf - 4.0 * posLeftQuarter), SafeNormalize(4.0 * posRightQuarter - 3.0 * posCenter - posRightHalf), SideWeight(halfFitLeft), SideWeight(halfFitRight),
+                                              CentralTangent(posRightHalf - posLeftHalf, posRightQuarter - posLeftQuarter, posRightHalf - posLeftHalf, min(halfFitLeft, halfFitRight)), max(halfFitLeft, halfFitRight), 0.07, 0.25);
+            float3 halfTangentY = AxisTangent(SafeNormalize(3.0 * posCenter + posTopHalf - 4.0 * posTopQuarter), SafeNormalize(4.0 * posBottomQuarter - 3.0 * posCenter - posBottomHalf), SideWeight(halfFitTop), SideWeight(halfFitBottom),
+                                              CentralTangent(posBottomHalf - posTopHalf, posBottomQuarter - posTopQuarter, posBottomHalf - posTopHalf, min(halfFitTop, halfFitBottom)), max(halfFitTop, halfFitBottom), 0.07, 0.25);
+            float3 halfNormal   = SafeNormalize(cross(halfTangentX, halfTangentY));
 
-            return float4(n, zC);
-        }
+            //Lepski: the wide scale only within 5..25 deg of the half one
+            bool   wideJumped  = WideArmJumped(HalfArmsInLine(posCenter - posLeftHalf, posRightHalf - posCenter), armLeft, armRight) || WideArmJumped(HalfArmsInLine(posCenter - posTopHalf, posBottomHalf - posCenter), armTop, armBottom);
+            float  wideWeight  = wideJumped ? 0.0 : 1.0 - smoothstep(0.0872388, 0.4328792, NormalChord(wideNormal, halfNormal));
+            float  ratioLeft   = DepthRatio(posLeft.z, depthC), ratioRight  = DepthRatio(posRight.z, depthC);
+            float  ratioTop    = DepthRatio(posTop.z, depthC),  ratioBottom = DepthRatio(posBottom.z, depthC);
+            float  noSilhouetteX = 1.0 - smoothstep(1.1, 1.3, max(ratioLeft, ratioRight)), noSilhouetteY = 1.0 - smoothstep(1.1, 1.3, max(ratioTop, ratioBottom));
+            wideWeight *= 1.0 - max(CurvatureDrop(min(fitLeft, fitRight), min(halfFitLeft, halfFitRight), max(halfFitLeft, halfFitRight), noSilhouetteX),
+                                    CurvatureDrop(min(fitTop, fitBottom), min(halfFitTop, halfFitBottom), max(halfFitTop, halfFitBottom), noSilhouetteY));
+            float3 normal = SafeNormalize(lerp(halfNormal, wideNormal, wideWeight));
 
-        float4 ATrousNormalsH(sampler2D gbufferSrc, float2 uv, uint dilation)
-        {
-            static const int2 offsets[4] = {              int2(0,-1),
-                                             int2(-1, 0),             int2(1, 0),
-                                                          int2(0, 1) };
+            //the 1-px guide
+            float3 guideNormal   = tex2Dlod(sGuideNormals, float4(uvCenter, 0, 0)).rgb;
+            float3 quarterNormal = SafeNormalize(cross(SafeNormalize(posRightQuarter - posLeftQuarter), SafeNormalize(posBottomQuarter - posTopQuarter)));
+            float  wideConf      = 1.0 - smoothstep(0.15, 0.3, max(min(fitLeft, fitRight), min(fitTop, fitBottom)));
+            float  halfConf      = 1.0 - smoothstep(0.15, 0.3, max(min(halfFitLeft, halfFitRight), min(halfFitTop, halfFitBottom)));
+            float  armConf       = lerp(halfConf, max(wideConf, halfConf), wideWeight);
+            armConf = max(armConf, max(1.0 - smoothstep(0.0523539, 0.1046719, NormalChord(guideNormal, quarterNormal)), smoothstep(1.2, 1.5, max(min(ratioLeft, ratioRight), min(ratioTop, ratioBottom)))));
+            float  fadeLo = lerp(0.9659258, lerp(0.8191520, 0.7660444, wideWeight), armConf), fadeHi = lerp(0.9902681, lerp(0.9396926, 0.9063078, wideWeight), armConf);
+            normal = SafeNormalize(lerp(guideNormal, normal, saturate((dot(normal, guideNormal) - fadeLo) / (fadeHi - fadeLo))));
 
-            float4 centerGeo = tex2Dlod(gbufferSrc, float4(uv, 0, 0));
-            float  detail = saturate(dot(fwidth(centerGeo.rgb), float3(1,1,1)) * DETAIL_GAIN); //0 = facet interior/flat, 1 = dense variation
-            if (centerGeo.a >= 0.999) return centerGeo; //sky/far
-            float  strideScale = clamp(STRIDE_NEAR_REF * exp2(-detail) / max(centerGeo.a, 1e-5), RES_SCALE, STRIDE_MAX); //world-locked footprint
-            float  ringR = dilation * strideScale; //hoist: shared by rotation gate and every tap
-            float  rotAng  = (ringR > 1.5) ? frac(GetStratifiedNoise(uv * HRAN_SIZE).x + float(dilation) * 0.6180339887) * 1.5707963268 : 0.0; //rotate cross: scrambles band phase into grain the next pass averages away
-            float  rotS, rotC; sincos(rotAng, rotS, rotC);
-            float  invDepthTol = 1.0 / (centerGeo.a * DEPTH_TOL_SLOPE * sqrt(strideScale / RES_SCALE) + EPSILON); //slope term ~ z*sqrt(stride) covers curvature headroom
-            float  invDepthTolL2 = invDepthTol * 1.4426950408; //log2(e) prefold: exp(-x)==exp2(-x*log2e)
-            float3 armSum      = 0.0; //arms accumulate FIRST; the centre's weight is decided after,
-            float  armWeight   = 0.0; //once we know how many of them actually survived the gates
-            float4 geo[4];
-            [unroll] for (int i = 0; i < 2; i++) {
-                float2 offIdeal = float2(offsets[i]) * ringR; //full-res grid stride, depth-adaptive
-                float2 offPx    = float2(offIdeal.x * rotC - offIdeal.y * rotS, offIdeal.x * rotS + offIdeal.y * rotC);
-                offPx           = floor(offPx + 0.5); //texel snap
-                //border guard: scale the MIRRORED pair down so both taps stay on the half grid
-                float2 hcPos = uv * HRAN_SIZE;
-                float2 avail = max(min(hcPos, HRAN_SIZE - 1.0 - hcPos), 0.0);
-                float  bsc   = min(1.0, min(avail.x / max(abs(offPx.x), 1e-3), avail.y / max(abs(offPx.y), 1e-3)));
-                offPx        = floor(offPx * bsc + 0.5);
-                float2 sampleUV = uv + offPx * HRAN_PX;
-                geo[i]     = tex2Dlod(gbufferSrc, float4(sampleUV, 0, 0)); //one fetch = signal + both guides
-                geo[3 - i] = tex2Dlod(gbufferSrc, float4(uv - offPx * HRAN_PX, 0, 0)); //mirrored partner, same snapped offset
-            }
+            //the guide trusted where it is right
+            float  wideFit    = max(min(fitLeft, fitRight), min(fitTop, fitBottom)), halfFit = max(min(halfFitLeft, halfFitRight), min(halfFitTop, halfFitBottom));
+            float  guideTrust = smoothstep(0.1, 0.2, wideFit) * (1.0 - smoothstep(0.0697990, 0.1395129, NormalChord(guideNormal, quarterNormal))) * (1.0 - smoothstep(0.2, 0.4, abs(halfFit / max(wideFit, 1e-6) - 0.5))) * smoothstep(0.0261799, 0.0523539, NormalChord(guideNormal, normal));
+            normal = SafeNormalize(lerp(normal, guideNormal, guideTrust));
 
-            //curvature consistency
-            float3 d2x = geo[1].rgb + geo[2].rgb - 2.0 * centerGeo.rgb;
-            float3 d2y = geo[0].rgb + geo[3].rgb - 2.0 * centerGeo.rgb;
-            float  curv = (length(d2x) + length(d2y)) * 0.5;
-            bool   ringValid = (geo[0].a < 0.999) && (geo[1].a < 0.999) && (geo[2].a < 0.999) && (geo[3].a < 0.999);
-            float  curvGate  = ringValid ? (1.0 - smoothstep(CURV_LO, CURV_HI, curv)) : 0.0;
-            float  tapWindow = lerp(1.3333333, CURV_OPEN_WINDOW, curvGate);
-            //planar depth prediction
-            float dzdxF = geo[2].a - centerGeo.a, dzdxB = centerGeo.a - geo[1].a; //E-C, C-W
-            float dzdyF = geo[3].a - centerGeo.a, dzdyB = centerGeo.a - geo[0].a; //S-C, C-N
-            float dzdx  = abs(dzdxF) < abs(dzdxB) ? dzdxF : dzdxB;
-            float dzdy  = abs(dzdyF) < abs(dzdyB) ? dzdyF : dzdyB;
-            float gradCap = 6.0 / invDepthTol;
-            dzdx = clamp(dzdx, -gradCap, gradCap);
-            dzdy = clamp(dzdy, -gradCap, gradCap);
-            [unroll] for (int i = 0; i < 4; i++) {
-                float4 sampleGeo    = geo[i];
-                float  planeResid   = sampleGeo.a - (centerGeo.a + dzdx * float(offsets[i].x) + dzdy * float(offsets[i].y));
-                float  depthWeight  = exp2(-abs(planeResid) * invDepthTolL2); //point-to-plane: slanted floors and gentle kinks pass, depth discontinuities fail
-                float  nAlign       = saturate(dot(centerGeo.rgb, sampleGeo.rgb));
-                float  normalWeight = saturate(nAlign * tapWindow - (tapWindow - 1.0)); //angular window
-                float  weight       = depthWeight * normalWeight * 2.0; //uniform arm weight
-                weight              = sampleGeo.a >= 0.999 ? 0.0 : weight; //skip skylines
-                armSum             += sampleGeo.rgb * weight;
-                armWeight          += weight;
-            }
-
-            //adaptive center weight to the flicker on small geometry
-            float  armConf     = saturate(armWeight * 0.125); //8.0 = four arms x 2.0 max
-            float  centerW     = lerp(4.0, MERGE_CENTER_WEIGHT, armConf);
-            float3 sum         = centerGeo.rgb * centerW + armSum;
-            float  totalWeight = centerW + armWeight;
-
-            float  filteredLen = length(sum);
-            float3 mergedDir   = (filteredLen > EPSILON) ? sum / filteredLen : centerGeo.rgb;
-
-            //coherence gate
-            float coherence     = filteredLen / max(totalWeight, EPSILON);
-            float coherenceGate = smoothstep(COHERENCE_LO, COHERENCE_HI, coherence);
-
-            float mergeStrength = max(coherenceGate, curvGate);
-            float3 filtered    = normalize(lerp(centerGeo.rgb, mergedDir, mergeStrength));
-
-            return float4(filtered, centerGeo.a); //depth rides through untouched
+            return float4(normal, depthC);
         }
 
         float4 PS_HRAN_A(float4 vp : SV_Position, float2 uv : TEXCOORD) : SV_Target { return ATrousNormalsH(sHRAN_H0, uv, 2); }
@@ -769,62 +872,63 @@ float PS_PackFeatures(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Targe
 
         float4 PS_HRAN_Up(float4 vp : SV_Position, float2 uv : TEXCOORD) : SV_Target
         {   //joint-bilateral upsample
-            float4 g = tex2Dlod(sGuideNormals, float4(uv, 0, 0));
-            if (g.a >= 0.999) return g; //sky/far
+            float4 guide = tex2Dlod(sGuideNormals, float4(uv, 0, 0));
+            if (guide.a >= 0.999) return guide;
             //center-relative one-sided guide slopes at FULL res (min-mag guard: silhouette on one side can't poison the other)
-            float zE = tex2Dlod(sGuideNormals, float4(uv + float2(BUFFER_PIXEL_SIZE.x, 0), 0, 0)).a;
-            float zW = tex2Dlod(sGuideNormals, float4(uv - float2(BUFFER_PIXEL_SIZE.x, 0), 0, 0)).a;
-            float zS = tex2Dlod(sGuideNormals, float4(uv + float2(0, BUFFER_PIXEL_SIZE.y), 0, 0)).a;
-            float zN = tex2Dlod(sGuideNormals, float4(uv - float2(0, BUFFER_PIXEL_SIZE.y), 0, 0)).a;
-            float dxF = zE - g.a, dxB = g.a - zW;
-            float dzdx = abs(dxF) < abs(dxB) ? dxF : dxB;
-            float dyF = zS - g.a, dyB = g.a - zN;
-            float dzdy = abs(dyF) < abs(dyB) ? dyF : dyB;
-            float invTol   = 1.0 / (g.a * HRAN_TOL_SLOPE + HRAN_TOL_FLOOR); //span ~1-2 full px -> no stride coupling needed
-            float invTolL2 = invTol * 1.4426950408; //log2(e) prefold
-            float gradCap  = 3.0 / invTol; //cut-poisoned-fit cap, same job as always
-            dzdx = clamp(dzdx, -gradCap, gradCap);
-            dzdy = clamp(dzdy, -gradCap, gradCap);
-            float2 hc   = uv * HRAN_SIZE - 0.5;
-            float2 hb   = min(max(floor(hc), 0.0), HRAN_SIZE - 2.0); //border guard: the 2x2 always reads real texels
-            float2 fr   = hc - hb;
-            float2 frw  = smoothstep(0.0, 1.0, fr);
-            float2 base = (hb + 0.5) * HRAN_PX;
-            float3 nsum = 0.0;  float ws = 0.0;
+            float  depthEast  = tex2Dlod(sGuideNormals, float4(uv + float2(BUFFER_PIXEL_SIZE.x, 0), 0, 0)).a;
+            float  depthWest  = tex2Dlod(sGuideNormals, float4(uv - float2(BUFFER_PIXEL_SIZE.x, 0), 0, 0)).a;
+            float  depthSouth = tex2Dlod(sGuideNormals, float4(uv + float2(0, BUFFER_PIXEL_SIZE.y), 0, 0)).a;
+            float  depthNorth = tex2Dlod(sGuideNormals, float4(uv - float2(0, BUFFER_PIXEL_SIZE.y), 0, 0)).a;
+            float  slopeEast  = depthEast - guide.a, slopeWest = guide.a - depthWest;
+            float  depthSlopeX = abs(slopeEast) < abs(slopeWest) ? slopeEast : slopeWest;
+            float  slopeSouth = depthSouth - guide.a, slopeNorth = guide.a - depthNorth;
+            float  depthSlopeY = abs(slopeSouth) < abs(slopeNorth) ? slopeSouth : slopeNorth;
+            float  invDepthTol   = 1.0 / (guide.a * HRAN_TOL_SLOPE + HRAN_TOL_FLOOR); //span ~1-2 full px -> no stride coupling needed
+            float  invDepthTolL2 = invDepthTol * 1.4426950408; //log2(e) prefold
+            float  gradCap       = 3.0 / invDepthTol; //cut-poisoned-fit cap
+            depthSlopeX = clamp(depthSlopeX, -gradCap, gradCap);
+            depthSlopeY = clamp(depthSlopeY, -gradCap, gradCap);
+            float2 halfCoord = uv * HRAN_SIZE - 0.5;
+            float2 halfBase  = min(max(floor(halfCoord), 0.0), HRAN_SIZE - 2.0); //border guard: the 2x2 always reads real texels
+            float2 halfFrac  = halfCoord - halfBase; //linear weights (smoothstep ones flattened near each half-res texel: a staircase)
+            float2 baseUV    = (halfBase + 0.5) * HRAN_PX;
+            float3 normalSum = 0.0;  float weightSum = 0.0;
             [unroll] for (int j = 0; j < 2; j++)
             [unroll] for (int i = 0; i < 2; i++) {
-                float4 hg    = tex2Dlod(sHRAN_HA, float4(base + float2(i, j) * HRAN_PX, 0, 0));
-                float2 dFull = 2.0 * (float2(i, j) - fr); //tap offset in FULL-res px (one half-px = two full-px)
-                float  resid = hg.a - (g.a + dzdx * dFull.x + dzdy * dFull.y); //point-to-plane vs the pristine full-res guide
-                float  bi    = (i == 0 ? 1.0 - frw.x : frw.x) * (j == 0 ? 1.0 - frw.y : frw.y);
-                float  w     = exp2(-abs(resid) * invTolL2) * saturate(saturate(dot(g.rgb, hg.rgb)) * 1.3333333 - 0.3333333) * bi; //75deg window
-                w            = hg.a >= 0.999 ? 0.0 : w;
-                nsum        += hg.rgb * w;  ws += w;
+                float4 halfSample     = tex2Dlod(sHRAN_HA, float4(baseUV + float2(i, j) * HRAN_PX, 0, 0));
+                float2 offsetFull     = 2.0 * (float2(i, j) - halfFrac); //tap offset in FULL-res px (one half-px = two full-px)
+                float  planeResid     = halfSample.a - (guide.a + depthSlopeX * offsetFull.x + depthSlopeY * offsetFull.y); //point-to-plane vs the full-res guide
+                float  bilinearWeight = (i == 0 ? 1.0 - halfFrac.x : halfFrac.x) * (j == 0 ? 1.0 - halfFrac.y : halfFrac.y);
+                float  weight         = exp2(-abs(planeResid) * invDepthTolL2) * saturate(saturate(dot(guide.rgb, halfSample.rgb)) * 1.3333333 - 0.3333333) * bilinearWeight; //75 deg window
+                weight                = halfSample.a >= 0.999 ? 0.0 : weight;
+                normalSum            += halfSample.rgb * weight;  weightSum += weight;
             }
-            if (ws < 1e-4) return g; //never blend on the wrong-side, let raw normal through, unsmoothed but correct here
-            float3 n = nsum / ws;  float len = length(n);
-            float3 outN = (len > EPSILON) ? n / len : g.rgb;
+            if (weightSum < 1e-4) return guide; //never blend on the wrong side: the raw normal through, unsmoothed but correct here
+            float3 avgNormal = normalSum / weightSum;  float avgLength = length(avgNormal);
+            float3 outNormal = (avgLength > EPSILON) ? avgNormal / avgLength : guide.rgb;
 
             //luma micro-relief
             [branch] if (abs(LUMA_DETAIL) > 1e-4)
             {
-                float  lodEff = LUMA_DETAIL_LOD + log2(RES_SCALE);
-                float  lodPx = exp2(lodEff);
-                float2 lr    = BUFFER_PIXEL_SIZE * lodPx;
-                float lE = tex2Dlod(sCurrLuma, float4(uv + float2(lr.x, 0), 0, lodEff)).r;
-                float lW = tex2Dlod(sCurrLuma, float4(uv - float2(lr.x, 0), 0, lodEff)).r;
-                float lS = tex2Dlod(sCurrLuma, float4(uv + float2(0, lr.y), 0, lodEff)).r;
-                float lN = tex2Dlod(sCurrLuma, float4(uv - float2(0, lr.y), 0, lodEff)).r;
-                float2 lg = float2(lE - lW, lS - lN) * 0.5;
-                lg = sign(lg) * min(abs(lg), 0.08); //cap: residual hard edges emboss boundedly
-                outN = normalize(outN + float3(-lg.x, -lg.y, 0.0) * (LUMA_DETAIL * 8.0));
+                float  lumaLod    = LUMA_DETAIL_LOD + log2(RES_SCALE);
+                float  lumaLodPx  = exp2(lumaLod);
+                float2 lumaOffset = BUFFER_PIXEL_SIZE * lumaLodPx;
+                float  lumaEast  = tex2Dlod(sCurrLuma, float4(uv + float2(lumaOffset.x, 0), 0, lumaLod)).r;
+                float  lumaWest  = tex2Dlod(sCurrLuma, float4(uv - float2(lumaOffset.x, 0), 0, lumaLod)).r;
+                float  lumaSouth = tex2Dlod(sCurrLuma, float4(uv + float2(0, lumaOffset.y), 0, lumaLod)).r;
+                float  lumaNorth = tex2Dlod(sCurrLuma, float4(uv - float2(0, lumaOffset.y), 0, lumaLod)).r;
+                float2 lumaGradient = float2(lumaEast - lumaWest, lumaSouth - lumaNorth) * 0.5;
+                lumaGradient = sign(lumaGradient) * min(abs(lumaGradient), 0.08); //cap: residual hard edges emboss boundedly
+                outNormal = normalize(outNormal + float3(-lumaGradient.x, -lumaGradient.y, 0.0) * (LUMA_DETAIL * 8.0));
             }
-            return float4(outN, g.a); //full-res depth rides through
+            return float4(outNormal, guide.a); //full-res depth rides through
         }
 
     #endif
 #endif
+}
 
+namespace Flow {
 float2 PS_ComputeFlow128(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 {
     if(FRAME_COUNT == 0) return float2(0, 0);
@@ -911,9 +1015,10 @@ float2 PS_ATrousPassB(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Targe
 {
     float2 flow = ATrousFilter(sFlow8, uv, 4, 1);
     //kill sub-pixel noise
-    float flowPixelMag = length(flow / BUFFER_PIXEL_SIZE);
-    float gate = saturate(1.0 - pow(1.0 - saturate(saturate(flowPixelMag) - 0.2), 10.0)); //SNAP TO REALITY
-    return flow*gate;
+    //float flowPixelMag = length(flow / BUFFER_PIXEL_SIZE);
+    //float gate = saturate(1.0 - pow(1.0 - saturate(saturate(flowPixelMag) - 0.2), 10.0)); //SNAP TO REALITY
+    //return flow*gate;
+    return flow;
 }
 
 float PS_Confidence(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
@@ -986,10 +1091,9 @@ float PS_StoreLuma(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 {
     return tex2D(sCurrLuma, uv).r;
 }
+}
 
-
-
-
+namespace Fog {
 void PS_DarkChannel(float4 pos : SV_Position, float2 uv : TEXCOORD, out float2 darkChannel : SV_Target0, out float4 brightest : SV_Target1)
 {
     float2 blockOrigin    = floor(pos.xy) * 4.0;
@@ -1011,7 +1115,7 @@ void PS_DarkChannel(float4 pos : SV_Position, float2 uv : TEXCOORD, out float2 d
     float3 brightestLinear = max(ToLinearColorspace(brightestColor, false), 0.0);
     float3 airlight        = GetAirlight();
     float  rawDark         = MinComponent(minLinear);
-    float  airlightKey     = (rawDark >= HIGHLIGHT_CLIP_LEVEL * GetMaxColorValue()) ? 0.0 : rawDark; //clipped highlights never become airlight
+    float  airlightKey     = (rawDark >= FOG_HIGHLIGHT_CLIP_LEVEL * GetMaxColorValue()) ? 0.0 : rawDark; //clipped highlights never become airlight
     darkChannel   = float2(MinComponent(minLinear / airlight), airlightKey); //dark channel of I/A
     brightest = float4(brightestLinear, 1.0);
 }
@@ -1019,9 +1123,9 @@ void PS_DarkChannel(float4 pos : SV_Position, float2 uv : TEXCOORD, out float2 d
 float2 PS_PatchMinHorizontal(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 {
     float2 patchMin = tex2Dlod(sDarkChannel, float4(uv, 0, 0)).rg;
-    [unroll] for (int i = 1; i <= PATCH_RADIUS; i++)
+    [unroll] for (int i = 1; i <= FOG_PATCH_RADIUS; i++)
     {
-        float2 tapOffset = float2(float(i) * GRID_TEXEL.x, 0.0);
+        float2 tapOffset = float2(float(i) * FOG_GRID_TEXEL.x, 0.0);
         patchMin = min(patchMin, min(tex2Dlod(sDarkChannel, float4(uv + tapOffset, 0, 0)).rg, tex2Dlod(sDarkChannel, float4(uv - tapOffset, 0, 0)).rg));
     }
     return patchMin;
@@ -1030,9 +1134,9 @@ float2 PS_PatchMinHorizontal(float4 pos : SV_Position, float2 uv : TEXCOORD) : S
 void PS_PatchMinVertical(float4 pos : SV_Position, float2 uv : TEXCOORD, out float2 transmissionOut : SV_Target0, out float4 moments : SV_Target1)
 {
     float2 patchMin = tex2Dlod(sDarkChannelRowMin, float4(uv, 0, 0)).rg;
-    [unroll] for (int i = 1; i <= PATCH_RADIUS; i++)
+    [unroll] for (int i = 1; i <= FOG_PATCH_RADIUS; i++)
     {
-        float2 tapOffset = float2(0.0, float(i) * GRID_TEXEL.y);
+        float2 tapOffset = float2(0.0, float(i) * FOG_GRID_TEXEL.y);
         patchMin = min(patchMin, min(tex2Dlod(sDarkChannelRowMin, float4(uv + tapOffset, 0, 0)).rg, tex2Dlod(sDarkChannelRowMin, float4(uv - tapOffset, 0, 0)).rg));
     }
     float haze          = saturate(0.95 * patchMin.x); //HAZE_RETENTION = 0.95 per He et al.
@@ -1060,7 +1164,7 @@ void PS_ReduceAirlight1(float4 pos : SV_Position, float2 uv : TEXCOORD, out floa
     {
         int2   tapPos          = blockOrigin + int2(x, y);
         bool   isValid         = all(tapPos < int2(FOG_GRID_W, FOG_GRID_H));
-        float2 tapUV           = (float2(tapPos) + 0.5) * GRID_TEXEL;
+        float2 tapUV           = (float2(tapPos) + 0.5) * FOG_GRID_TEXEL;
         float2 transmissionKey = tex2Dlod(sTransmission, float4(tapUV, 0, 0)).xy;
         float3 candidateColor  = tex2Dlod(sBrightestColor, float4(tapUV, 0, 0)).rgb;
         bool   isBetter        = isValid && (transmissionKey.y > best.a);
@@ -1106,7 +1210,7 @@ float4 PS_ResolveFogState(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_T
         total += isValid ? partialSum : float2(0.0, 0.0);
     }
     float3 airlight = (best.a >= 0.0) ? best.rgb : float3(1.0, 1.0, 1.0);
-    airlight = min(airlight, HIGHLIGHT_CLIP_LEVEL * GetMaxColorValue());
+    airlight = min(airlight, FOG_HIGHLIGHT_CLIP_LEVEL * GetMaxColorValue());
     float  density = total.x / max(total.y, 1.0);
 
     float4 prevState     = ReadFogState(sPrevFogState, 0);
@@ -1120,11 +1224,11 @@ float4 PS_GuideMomentsHorizontal(float4 pos : SV_Position, float2 uv : TEXCOORD)
 {
     float4 momentSum = 0.0;
     float  tapCount  = 0.0;
-    [unroll] for (int i = -GUIDE_RADIUS; i <= GUIDE_RADIUS; i++)
+    [unroll] for (int i = -FOG_GUIDE_RADIUS; i <= FOG_GUIDE_RADIUS; i++)
     {
         float  tapX       = pos.x + float(i);
-        bool   isValid    = (tapX > 0.0) && (tapX < GRID_SIZE.x);
-        float4 tapMoments = tex2Dlod(sGuideMoments, float4(tapX * GRID_TEXEL.x, uv.y, 0, 0));
+        bool   isValid    = (tapX > 0.0) && (tapX < FOG_GRID_SIZE.x);
+        float4 tapMoments = tex2Dlod(sGuideMoments, float4(tapX * FOG_GRID_TEXEL.x, uv.y, 0, 0));
         momentSum += isValid ? tapMoments : float4(0.0, 0.0, 0.0, 0.0);
         tapCount  += isValid ? 1.0 : 0.0;
     }
@@ -1135,11 +1239,11 @@ float2 PS_GuideCoeffs(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Targe
 {
     float4 momentSum = 0.0;
     float  tapCount  = 0.0;
-    [unroll] for (int i = -GUIDE_RADIUS; i <= GUIDE_RADIUS; i++)
+    [unroll] for (int i = -FOG_GUIDE_RADIUS; i <= FOG_GUIDE_RADIUS; i++)
     {
         float  tapY       = pos.y + float(i);
-        bool   isValid    = (tapY > 0.0) && (tapY < GRID_SIZE.y);
-        float4 tapMoments = tex2Dlod(sGuideMomentsRowMean, float4(uv.x, tapY * GRID_TEXEL.y, 0, 0));
+        bool   isValid    = (tapY > 0.0) && (tapY < FOG_GRID_SIZE.y);
+        float4 tapMoments = tex2Dlod(sGuideMomentsRowMean, float4(uv.x, tapY * FOG_GRID_TEXEL.y, 0, 0));
         momentSum += isValid ? tapMoments : float4(0.0, 0.0, 0.0, 0.0);
         tapCount  += isValid ? 1.0 : 0.0;
     }
@@ -1154,11 +1258,11 @@ float2 PS_GuideCoeffsHorizontal(float4 pos : SV_Position, float2 uv : TEXCOORD) 
 {
     float2 coeffSum = 0.0;
     float  tapCount = 0.0;
-    [unroll] for (int i = -GUIDE_RADIUS; i <= GUIDE_RADIUS; i++)
+    [unroll] for (int i = -FOG_GUIDE_RADIUS; i <= FOG_GUIDE_RADIUS; i++)
     {
         float  tapX      = pos.x + float(i);
-        bool   isValid   = (tapX > 0.0) && (tapX < GRID_SIZE.x);
-        float2 tapCoeffs = tex2Dlod(sGuideCoeffs, float4(tapX * GRID_TEXEL.x, uv.y, 0, 0)).xy;
+        bool   isValid   = (tapX > 0.0) && (tapX < FOG_GRID_SIZE.x);
+        float2 tapCoeffs = tex2Dlod(sGuideCoeffs, float4(tapX * FOG_GRID_TEXEL.x, uv.y, 0, 0)).xy;
         coeffSum += isValid ? tapCoeffs : float2(0.0, 0.0);
         tapCount += isValid ? 1.0 : 0.0;
     }
@@ -1169,11 +1273,11 @@ float2 PS_GuideCoeffsVertical(float4 pos : SV_Position, float2 uv : TEXCOORD) : 
 {
     float2 coeffSum = 0.0;
     float  tapCount = 0.0;
-    [unroll] for (int i = -GUIDE_RADIUS; i <= GUIDE_RADIUS; i++)
+    [unroll] for (int i = -FOG_GUIDE_RADIUS; i <= FOG_GUIDE_RADIUS; i++)
     {
         float  tapY      = pos.y + float(i);
-        bool   isValid   = (tapY > 0.0) && (tapY < GRID_SIZE.y);
-        float2 tapCoeffs = tex2Dlod(sGuideCoeffsRowMean, float4(uv.x, tapY * GRID_TEXEL.y, 0, 0)).xy;
+        bool   isValid   = (tapY > 0.0) && (tapY < FOG_GRID_SIZE.y);
+        float2 tapCoeffs = tex2Dlod(sGuideCoeffsRowMean, float4(uv.x, tapY * FOG_GRID_TEXEL.y, 0, 0)).xy;
         coeffSum += isValid ? tapCoeffs : float2(0.0, 0.0);
         tapCount += isValid ? 1.0 : 0.0;
     }
@@ -1195,10 +1299,9 @@ float4 PS_StoreFogState(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Tar
 {
     return tex2Dlod(sFogState, float4(uv, 0, 0));
 }
+}
 
-
-
-
+namespace Debug {
 #if DEBUG_KERNEL
     float4 PS_Debug(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
     {
@@ -1301,9 +1404,9 @@ float4 PS_StoreFogState(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Tar
 
             case 6:
             {
-                float3 airlight     = max(min(ReadFogState(sFogState, 0).rgb, HIGHLIGHT_CLIP_LEVEL * GetMaxColorValue()), 0.001);
+                float3 airlight     = max(min(Fog::ReadFogState(sFogState, 0).rgb, Fog::FOG_HIGHLIGHT_CLIP_LEVEL * GetMaxColorValue()), 0.001);
                 float3 workingColor = max(ToLinearColorspace(sceneColor, false), 0.0);
-                float  transmission = ComputeTransmission(uv);
+                float  transmission = Fog::ComputeTransmission(uv);
                 float3 dehazed      = max((workingColor - airlight) / max(transmission, 0.1) + airlight, 0.0);
                 return float4(ToOutputColorspace(dehazed, false), 1.0);
             }
@@ -1312,6 +1415,7 @@ float4 PS_StoreFogState(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Tar
         }
     }
 #endif
+}
 
 /*----------------.
 | :: TECHNIQUE :: |
@@ -1327,61 +1431,61 @@ technique Lumenite_Kernel <
     //normals
     #if IMAGE_SPACE == 0
         #if SMOOTH_NORMALS == 0
-            pass { VertexShader = VS;            PixelShader = PS_ReconstructNormals; RenderTarget0 = tNormals;      RenderTarget1 = tDepth;   }
+            pass { VertexShader = VS;            PixelShader = Normals::PS_ReconstructNormals; RenderTarget0 = tNormals;      RenderTarget1 = tDepth;   }
         #else
-            pass { VertexShader = VS;            PixelShader = PS_ReconstructNormals; RenderTarget0 = tGuideNormals; RenderTarget1 = tDepth;   }
-            pass { VertexShader = VS;            PixelShader = PS_HRAN_Half;          RenderTarget  = texHRAN_H0;                              }
-            pass { VertexShader = PostProcessVS; PixelShader = PS_HRAN_A;             RenderTarget  = texHRAN_HA;                              }
-            pass { VertexShader = PostProcessVS; PixelShader = PS_HRAN_B;             RenderTarget  = texHRAN_HB;                              }
-            pass { VertexShader = PostProcessVS; PixelShader = PS_HRAN_C;             RenderTarget  = texHRAN_HA;                              }
-            pass { VertexShader = PostProcessVS; PixelShader = PS_HRAN_Up;            RenderTarget  = tNormals;                                }
+            pass { VertexShader = VS;            PixelShader = Normals::PS_ReconstructNormals; RenderTarget0 = Normals::tGuideNormals; RenderTarget1 = tDepth;   }
+            pass { VertexShader = VS;            PixelShader = Normals::PS_HRAN_Half;          RenderTarget  = Normals::texHRAN_H0;                              }
+            pass { VertexShader = PostProcessVS; PixelShader = Normals::PS_HRAN_A;             RenderTarget  = Normals::texHRAN_HA;                              }
+            pass { VertexShader = PostProcessVS; PixelShader = Normals::PS_HRAN_B;             RenderTarget  = Normals::texHRAN_HB;                              }
+            pass { VertexShader = PostProcessVS; PixelShader = Normals::PS_HRAN_C;             RenderTarget  = Normals::texHRAN_HA;                              }
+            pass { VertexShader = PostProcessVS; PixelShader = Normals::PS_HRAN_Up;            RenderTarget  = tNormals;                                }
         #endif
     #endif
 
     //optical flow
-    pass { VertexShader = PostProcessVS; PixelShader = PS_ComputeFlow128;  RenderTarget  = tFlow128;    }
-    pass { VertexShader = PostProcessVS; PixelShader = PS_UpscaleFlow64;   RenderTarget  = tFlow64A;    }
-    pass { VertexShader = PostProcessVS; PixelShader = PS_MedianPass64;    RenderTarget  = tFlow64B;    }
-    pass { VertexShader = PostProcessVS; PixelShader = PS_UpscaleFlow32;   RenderTarget  = tFlow32A;    }
-    pass { VertexShader = PostProcessVS; PixelShader = PS_MedianPass32;    RenderTarget  = tFlow32B;    }
-    pass { VertexShader = PostProcessVS; PixelShader = PS_UpscaleFlow16;   RenderTarget  = tFlow16A;    }
-    pass { VertexShader = PostProcessVS; PixelShader = PS_MedianPass16;    RenderTarget  = tFlow16B;    }
+    pass { VertexShader = PostProcessVS; PixelShader = Flow::PS_ComputeFlow128;  RenderTarget  = Flow::tFlow128;    }
+    pass { VertexShader = PostProcessVS; PixelShader = Flow::PS_UpscaleFlow64;   RenderTarget  = Flow::tFlow64A;    }
+    pass { VertexShader = PostProcessVS; PixelShader = Flow::PS_MedianPass64;    RenderTarget  = Flow::tFlow64B;    }
+    pass { VertexShader = PostProcessVS; PixelShader = Flow::PS_UpscaleFlow32;   RenderTarget  = Flow::tFlow32A;    }
+    pass { VertexShader = PostProcessVS; PixelShader = Flow::PS_MedianPass32;    RenderTarget  = Flow::tFlow32B;    }
+    pass { VertexShader = PostProcessVS; PixelShader = Flow::PS_UpscaleFlow16;   RenderTarget  = Flow::tFlow16A;    }
+    pass { VertexShader = PostProcessVS; PixelShader = Flow::PS_MedianPass16;    RenderTarget  = Flow::tFlow16B;    }
 
-    pass { VertexShader = PostProcessVS; PixelShader = PS_UpscaleFlow8;    RenderTarget  = tFlow;       }
-    pass { VertexShader = PostProcessVS; PixelShader = PS_MedianPass8A;    RenderTarget  = tFlow8;      }
-    pass { VertexShader = PostProcessVS; PixelShader = PS_MedianPass8B;    RenderTarget  = tFlow;       }
-    pass { VertexShader = PostProcessVS; PixelShader = PS_Confidence;      RenderTarget  = tConfidence; }
-    pass { VertexShader = PostProcessVS; PixelShader = PS_ATrousPassA;     RenderTarget  = tFlow8;      }
-    pass { VertexShader = PostProcessVS; PixelShader = PS_ATrousPassB;     RenderTarget  = tFlow;       }
+    pass { VertexShader = PostProcessVS; PixelShader = Flow::PS_UpscaleFlow8;    RenderTarget  = tFlow;       }
+    pass { VertexShader = PostProcessVS; PixelShader = Flow::PS_MedianPass8A;    RenderTarget  = Flow::tFlow8;      }
+    pass { VertexShader = PostProcessVS; PixelShader = Flow::PS_MedianPass8B;    RenderTarget  = tFlow;       }
+    pass { VertexShader = PostProcessVS; PixelShader = Flow::PS_Confidence;      RenderTarget  = tConfidence; }
+    pass { VertexShader = PostProcessVS; PixelShader = Flow::PS_ATrousPassA;     RenderTarget  = Flow::tFlow8;      }
+    pass { VertexShader = PostProcessVS; PixelShader = Flow::PS_ATrousPassB;     RenderTarget  = tFlow;       }
 
-    pass { VertexShader = PostProcessVS; PixelShader = PS_StoreFlow; RenderTarget0 = tPrevFrameFlow; RenderTarget1 = tPrevConfidence; }
-    pass { VertexShader = PostProcessVS; PixelShader = PS_StoreLuma; RenderTarget  = tPrevLuma;                                       }
+    pass { VertexShader = PostProcessVS; PixelShader = Flow::PS_StoreFlow; RenderTarget0 = Flow::tPrevFrameFlow; RenderTarget1 = Flow::tPrevConfidence; }
+    pass { VertexShader = PostProcessVS; PixelShader = Flow::PS_StoreLuma; RenderTarget  = tPrevLuma;                                       }
 
     //dcp fog mask
     #if FOG_MASK
-        pass { VertexShader = PostProcessVS;  PixelShader = PS_DarkChannel;             RenderTarget0 = tDarkChannel;          RenderTarget1 = tBrightestColor; }
-        pass { VertexShader = PostProcessVS;  PixelShader = PS_PatchMinHorizontal;      RenderTarget  = tDarkChannelRowMin; }
-        pass { VertexShader = PostProcessVS;  PixelShader = PS_PatchMinVertical;        RenderTarget0 = tTransmission;         RenderTarget1 = tGuideMoments; }
+        pass { VertexShader = PostProcessVS;  PixelShader = Fog::PS_DarkChannel;             RenderTarget0 = Fog::tDarkChannel;          RenderTarget1 = Fog::tBrightestColor; }
+        pass { VertexShader = PostProcessVS;  PixelShader = Fog::PS_PatchMinHorizontal;      RenderTarget  = Fog::tDarkChannelRowMin; }
+        pass { VertexShader = PostProcessVS;  PixelShader = Fog::PS_PatchMinVertical;        RenderTarget0 = Fog::tTransmission;         RenderTarget1 = Fog::tGuideMoments; }
 
-        pass { VertexShader = PostProcessVS;  PixelShader = PS_ReduceAirlight1;         RenderTarget0 = tReduceBest1;          RenderTarget1 = tReduceSum1; }
-        pass { VertexShader = PostProcessVS;  PixelShader = PS_ReduceAirlight2;         RenderTarget0 = tReduceBest2;          RenderTarget1 = tReduceSum2; }
-        pass { VertexShader = PostProcessVS;  PixelShader = PS_ReduceAirlight3;         RenderTarget0 = tReduceBest3;          RenderTarget1 = tReduceSum3; }
-        pass { VertexShader = PostProcessVS;  PixelShader = PS_ReduceAirlight4;         RenderTarget0 = tReduceBest4;          RenderTarget1 = tReduceSum4; }
-        pass { VertexShader = PostProcessVS;  PixelShader = PS_ResolveFogState;         RenderTarget  = tFogState; }
+        pass { VertexShader = PostProcessVS;  PixelShader = Fog::PS_ReduceAirlight1;         RenderTarget0 = Fog::tReduceBest1;          RenderTarget1 = Fog::tReduceSum1; }
+        pass { VertexShader = PostProcessVS;  PixelShader = Fog::PS_ReduceAirlight2;         RenderTarget0 = Fog::tReduceBest2;          RenderTarget1 = Fog::tReduceSum2; }
+        pass { VertexShader = PostProcessVS;  PixelShader = Fog::PS_ReduceAirlight3;         RenderTarget0 = Fog::tReduceBest3;          RenderTarget1 = Fog::tReduceSum3; }
+        pass { VertexShader = PostProcessVS;  PixelShader = Fog::PS_ReduceAirlight4;         RenderTarget0 = Fog::tReduceBest4;          RenderTarget1 = Fog::tReduceSum4; }
+        pass { VertexShader = PostProcessVS;  PixelShader = Fog::PS_ResolveFogState;         RenderTarget  = tFogState; }
 
-        pass { VertexShader = PostProcessVS;  PixelShader = PS_GuideMomentsHorizontal;  RenderTarget  = tGuideMomentsRowMean; }
-        pass { VertexShader = PostProcessVS;  PixelShader = PS_GuideCoeffs;             RenderTarget  = tGuideCoeffs; }
-        pass { VertexShader = PostProcessVS;  PixelShader = PS_GuideCoeffsHorizontal;   RenderTarget  = tGuideCoeffsRowMean; }
-        pass { VertexShader = PostProcessVS;  PixelShader = PS_GuideCoeffsVertical;     RenderTarget  = tGuideCoeffsMean; }
+        pass { VertexShader = PostProcessVS;  PixelShader = Fog::PS_GuideMomentsHorizontal;  RenderTarget  = Fog::tGuideMomentsRowMean; }
+        pass { VertexShader = PostProcessVS;  PixelShader = Fog::PS_GuideCoeffs;             RenderTarget  = Fog::tGuideCoeffs; }
+        pass { VertexShader = PostProcessVS;  PixelShader = Fog::PS_GuideCoeffsHorizontal;   RenderTarget  = Fog::tGuideCoeffsRowMean; }
+        pass { VertexShader = PostProcessVS;  PixelShader = Fog::PS_GuideCoeffsVertical;     RenderTarget  = Fog::tGuideCoeffsMean; }
 
-        pass { VertexShader = PostProcessVS;  PixelShader = PS_FogMask;                 RenderTarget  = tFogMask; }
-        pass { VertexShader = PostProcessVS;  PixelShader = PS_StoreHaze;               RenderTarget  = tPrevHaze; }
-        pass { VertexShader = PostProcessVS;  PixelShader = PS_StoreFogState;           RenderTarget  = tPrevFogState; }
+        pass { VertexShader = PostProcessVS;  PixelShader = Fog::PS_FogMask;                 RenderTarget  = tFogMask; }
+        pass { VertexShader = PostProcessVS;  PixelShader = Fog::PS_StoreHaze;               RenderTarget  = Fog::tPrevHaze; }
+        pass { VertexShader = PostProcessVS;  PixelShader = Fog::PS_StoreFogState;           RenderTarget  = Fog::tPrevFogState; }
     #endif
 
     //debug views
 #if DEBUG_KERNEL
-    pass { VertexShader = PostProcessVS; PixelShader = PS_Debug; }
+    pass { VertexShader = PostProcessVS; PixelShader = Debug::PS_Debug; }
 #endif
 }
 

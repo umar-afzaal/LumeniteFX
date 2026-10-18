@@ -16,8 +16,8 @@
         Discord    : https://discord.gg/deXJrW2dx6
 
 
-        Filename   : QuantMotion.fx
-        Version    : 2026.06.16
+        Filename   : PocketMV.fx
+        Version    : 2026.10.17
         Author     : Afzaal (Kaidō)
         Description: Superfast motion vectors for low-end hardware.
         License    : AGNYA License (https://github.com/nvb-uy/AGNYA-License)
@@ -44,7 +44,7 @@
 '---------------*/
 uniform uint FRAME_COUNT < source = "framecount"; >;
 
-namespace QuantMotion {
+namespace PocketMV {
 
 /*---------------------.
 | :: RENDER TARGETS :: |
@@ -411,8 +411,8 @@ float4 PS_Debug(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 /*----------------.
 | :: TECHNIQUE :: |
 '----------------*/
-technique Lumenite_QuantMotion <
-    ui_label = "LUMENITE: QuantMotion";
+technique Lumenite_PocketMV <
+    ui_label = "LUMENITE: PocketMV";
     ui_tooltip = "Superfast motion vectors for ReShade.";
 >
 {

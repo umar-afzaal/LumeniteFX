@@ -16,10 +16,10 @@
         Discord    : https://discord.gg/deXJrW2dx6
 
 
-        Filename   : lumenite_QuantAO.fx
-        Version    : 2026.06.09
+        Filename   : lumenite_PocketAO.fx
+        Version    : 2026.10.17
         Author     : Afzaal (Kaidō)
-        Description: Fast Ambient Occlusion (Screen Space).
+        Description: Superfast Ambient Occlusion (Screen Space).
         License    : AGNYA License (https://github.com/nvb-uy/AGNYA-License)
 
         ========================================================================
@@ -78,7 +78,7 @@ uniform float AO_INTENSITY <
 /*--------------.
 | :: IMPORTS :: |
 '--------------*/
-namespace QuantMotion {
+namespace PocketMV {
     texture2D tFlow { Width = BUFFER_WIDTH/8; Height = BUFFER_HEIGHT/8; Format = RG16F; };
     sampler2D sFlow { Texture = tFlow; MagFilter = POINT; MinFilter = POINT; };
 
@@ -86,7 +86,7 @@ namespace QuantMotion {
     sampler2D sConfidence { Texture = tConfidence; };
 }
 
-namespace LumeniteQuantAO {
+namespace LumenitePocketAO {
 
 /*---------------------.
 | :: RENDER TARGETS :: |
@@ -169,7 +169,7 @@ float2 ATrousFilter(sampler SourceSampler, float2 uv, uint dilation, bool adapti
     if (gbuffer.a == 0 || gbuffer.a >= DEPTH_BOUNDARY) return float2(1.0, 0.0);
 
     [branch] if (adaptiveDilation) {
-        float confidence = tex2Dlod(QuantMotion::sConfidence, float4(uv, 0, 0)).r;
+        float confidence = tex2Dlod(PocketMV::sConfidence, float4(uv, 0, 0)).r;
         dilation += uint(round((1.0 - confidence) * 2.0)); //scale filter kernel w. motion by up to a factor of 2
     }
 
@@ -331,8 +331,8 @@ float2 PS_TemporalFilter(VSOUT input) : SV_Target
     float ao = tex2D(sAOTrace, input.uv).r;
     ao = lerp(1.0, ao, CalculateDepthFade(depth));
     float moment = ao * ao;
-    float2 flow = tex2D(QuantMotion::sFlow, input.uv).xy;
-    float confidence = tex2D(QuantMotion::sConfidence, input.uv).x;
+    float2 flow = tex2D(PocketMV::sFlow, input.uv).xy;
+    float confidence = tex2D(PocketMV::sConfidence, input.uv).x;
     confidence = saturate(confidence + log2(2.0 - confidence) * 0.55); //boost confidence
     float2 rawHistory = tex2D(sPrevAO, input.uv + flow).rg; //history stores "1.0 - AO". 0.0 (Black Texture) -> Reads as 1.0 (White)
     float prevAO = 1.0 - rawHistory.r;
@@ -379,9 +379,9 @@ float4 PS_ToDisplay(VSOUT input) : SV_Target
 /*----------------.
 | :: TECHNIQUE :: |
 '----------------*/
-technique Lumenite_QuantAO <
-    ui_label = "LUMENITE: QuantAO";
-    ui_tooltip = "Fast Ambient Occlusion (Screen Space).";
+technique Lumenite_PocketAO <
+    ui_label = "LUMENITE: PocketAO";
+    ui_tooltip = "Superfast Ambient Occlusion (Screen Space).";
 >
 {
     pass { VertexShader = VS; PixelShader = PS_ReconstructNormals; RenderTarget0 = tNormals; RenderTarget1 = tDepth; }
