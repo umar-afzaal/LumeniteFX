@@ -172,8 +172,10 @@ float GetFogBlock(float2 uv, float3 sceneColor)
 {
     float stamp = tex2Dlod(Kernel::sFogState, float4(0.75, 0.5, 0, 0)).x;
     bool fogActive = (stamp == float((FRAME_COUNT & 0xFFFFFu) + 1u)) || (stamp == float(((FRAME_COUNT - 1u) & 0xFFFFFu) + 1u));
-    [branch] if (!fogActive || FOG_BLOCK == 0.0) return 0.0;
-    return saturate(tex2Dlod(Kernel::sFogMask, float4(uv, 0, 0)).r * clamp(GetLuminance(tex2Dlod(Kernel::sFogState, float4(0.25, 0.5, 0, 0)).rgb) / max(GetLuminance(sceneColor), EPSILON), 0.0, 10.0) * FOG_BLOCK);
+    float fogBlock = 0.0;
+    [branch] if (fogActive && FOG_BLOCK != 0.0)
+        fogBlock = saturate(tex2Dlod(Kernel::sFogMask, float4(uv, 0, 0)).r * clamp(GetLuminance(tex2Dlod(Kernel::sFogState, float4(0.25, 0.5, 0, 0)).rgb) / max(GetLuminance(sceneColor), EPSILON), 0.0, 10.0) * FOG_BLOCK);
+    return fogBlock;
 }
 
 float3 CalculateSmoothNormal(float2 uv, float4 gbuffer, int dilation, sampler SrcSampler)
