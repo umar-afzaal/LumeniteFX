@@ -223,31 +223,6 @@ float2 ATrousFilter(sampler SourceSampler, float2 uv, uint dilation, bool adapti
     return result;
 }
 
-/*--------------.
-| :: SHADERS :: |
-'--------------*/
-//nearest depth over 8x8 px
-float PS_HiZ8(VSOUT input) : SV_Target
-{
-    int2 first = int2(input.vpos.xy) * 8;
-    float minDepth = 1.0;
-    [unroll] for (int y = 0; y < 8; y++)
-        [unroll] for (int x = 0; x < 8; x++)
-            minDepth = min(minDepth, tex2Dfetch(Kernel::sDepth, first + int2(x, y)).r);
-    return minDepth;
-}
-
-//4x4 of those
-float PS_HiZ32(VSOUT input) : SV_Target
-{
-    int2 first = int2(input.vpos.xy) * 4;
-    float minDepth = 1.0;
-    [unroll] for (int y = 0; y < 4; y++)
-        [unroll] for (int x = 0; x < 4; x++)
-            minDepth = min(minDepth, tex2Dfetch(sHiZ8, first + int2(x, y)).r);
-    return minDepth;
-}
-
 //1st hit's occlusion along one cos-weighted ray
 float TraceRay(VSOUT input)
 {
@@ -304,6 +279,31 @@ float TraceRay(VSOUT input)
         }
     }
     return 1.0 - saturate(occlusion * AO_INTENSITY);
+}
+
+/*--------------.
+| :: SHADERS :: |
+'--------------*/
+//nearest depth over 8x8 px
+float PS_HiZ8(VSOUT input) : SV_Target
+{
+    int2 first = int2(input.vpos.xy) * 8;
+    float minDepth = 1.0;
+    [unroll] for (int y = 0; y < 8; y++)
+        [unroll] for (int x = 0; x < 8; x++)
+            minDepth = min(minDepth, tex2Dfetch(Kernel::sDepth, first + int2(x, y)).r);
+    return minDepth;
+}
+
+//4x4 of those
+float PS_HiZ32(VSOUT input) : SV_Target
+{
+    int2 first = int2(input.vpos.xy) * 4;
+    float minDepth = 1.0;
+    [unroll] for (int y = 0; y < 4; y++)
+        [unroll] for (int x = 0; x < 4; x++)
+            minDepth = min(minDepth, tex2Dfetch(sHiZ8, first + int2(x, y)).r);
+    return minDepth;
 }
 
 float2 PS_RayTracer(VSOUT input) : SV_Target

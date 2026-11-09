@@ -207,8 +207,8 @@ sampler sFinalPrev { Texture = tFinalPrev; AddressU = CLAMP; AddressV = CLAMP; M
 texture tAO3 { Width = BUFFER_WIDTH / 2; Height = BUFFER_HEIGHT / 2; Format = RG16F; };
 sampler sAO3Point { Texture = tAO3; AddressU = CLAMP; AddressV = CLAMP; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
 
-//nearest depth over each 32x32 px blk
-texture tHiZ8    { Width = BUFFER_WIDTH/8;  Height = BUFFER_HEIGHT/8;  Format = R16F; };
+//8x8 blk: nearest (r), nearest/farthest +1 px ring (g, b); 32x32 blk: min of 4x4 r <- this style for DXVK
+texture tHiZ8    { Width = (BUFFER_WIDTH + 7) / 8; Height = (BUFFER_HEIGHT + 7) / 8; Format = RGBA32F; };
 texture tHiZMip5 { Width = BUFFER_WIDTH/32; Height = BUFFER_HEIGHT/32; Format = R16F; };
 sampler sHiZ8    { Texture = tHiZ8;    MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; AddressU = CLAMP; AddressV = CLAMP; };
 sampler sHiZMip5 { Texture = tHiZMip5; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; AddressU = CLAMP; AddressV = CLAMP; };
@@ -775,18 +775,102 @@ float4 UpsampleAOGI(float2 uv, float4 pixelGeo, VSOUT input)
     return lerp(fallback, edgeSum / max(edgeWeightSum, 1e-6), saturate(edgeWeightSum / 0.01));
 }
 
+float TraceRay(VSOUT input, float2 pixelUV, float4 gbuffer, out float3 bounce)
+{
+    float3 normal = gbuffer.rgb;
+    float depth = gbuffer.a;
+    float occlusion = 0.0;
+    bounce = 0.0;
+    [branch] if (!(depth == 0 || depth >= DEPTH_BOUNDARY))
+    {
+        float3 startPos = UVToViewSpace(pixelUV, depth, input);
+        float3 tangent, bitangent;
+        BuildOrthonormalBasis(normal, tangent, bitangent);
+        float2 noise = GetStratifiedNoise(input.vpos.xy);
+        float3 rayDir = GenerateHemisphereDirection(normal, noise, tangent, bitangent);
+        const float globalMaxDistance = 1.0;
+        float frustumDist = CalculateDistanceToFrustum(startPos, rayDir);
+        float totalRayLength = min(frustumDist, globalMaxDistance);
+        float stepSize = startPos.z * 0.005;
+        float t = stepSize * NEAR_STEP; //(near) first sample a quarter step out
+        float3 currentPos = startPos + rayDir * t;
+        //blk vals kept per blk and full-screen depth read only where a hit can pass <- DXVK fix
+        int2 texel32 = int2(-1, -1); float HiZDepth = 0.0;
+        int2 texel8 = int2(-1, -1); float2 bounds8 = 0.0;
+        [loop] for (int step = 0; step < 100; step++) {
+            if (t >= totalRayLength) break;
+
+            float2 hitPos = ViewSpaceToUV(currentPos, input);
+            if (IsOOB(hitPos)) break;
+
+            //32x32 blk's nearest (the txl point sample at hitPos selects)
+            int2 at32 = min(int2(hitPos * float2(BUFFER_WIDTH / 32, BUFFER_HEIGHT / 32)), int2(BUFFER_WIDTH / 32, BUFFER_HEIGHT / 32) - 1);
+            [branch] if (any(at32 != texel32)) { texel32 = at32; HiZDepth = tex2Dfetch(sHiZMip5, at32).r; }
+            bool nearStep = step < NEAR_STEPS; //(near) the first steps finer
+            float currentStepSize = stepSize * (nearStep ? 2.5 * NEAR_STEP : 2.5);
+
+            //skip some empty space
+            if (currentPos.z < HiZDepth && (HiZDepth - currentPos.z) > currentStepSize) {
+                float leap = max(currentStepSize, (HiZDepth - currentPos.z) * 0.065);
+                currentPos += rayDir * leap;
+                t += leap;
+                continue;
+            }
+
+            //no hit possible in front of the 8x8 blk's nearest or past its farthest's band: skip the depth read, step on
+            int2 at8 = min(int2(hitPos * BUFFER_SCREEN_SIZE), int2(BUFFER_WIDTH, BUFFER_HEIGHT) - 1) / 8;
+            [branch] if (any(at8 != texel8)) { texel8 = at8; bounds8 = tex2Dfetch(sHiZ8, at8).gb; }
+            [branch] if (!(currentPos.z <= bounds8.x || bounds8.y < currentPos.z * 0.9))
+            {
+                float sceneDepth = tex2Dlod(Kernel::sDepth, float4(hitPos, 0, 0)).r;
+                float depthDiff = currentPos.z - sceneDepth;
+                if (depthDiff > (currentPos.z * (nearStep ? 0.0025 : 0.005)) && depthDiff < (currentPos.z * 0.1)) {
+                    float2 sceneUV = hitPos;
+                    float3 scenePos = UVToViewSpace(sceneUV, sceneDepth, input);
+                    float hitDistance = length(scenePos - startPos);
+                    float normalizedDist = hitDistance / globalMaxDistance;
+                    occlusion = saturate(1.0 - normalizedDist);
+                    occlusion = occlusion * occlusion;
+                    //(near) contact band
+                    float nearFall = saturate(1.0 - hitDistance / (startPos.z * NEAR_RADIUS));
+                    occlusion = saturate(occlusion + NEAR_BOOST * nearFall * nearFall);
+                    //from faces turned toward the ray: hit's lit color + last frame's indirect light there (infinite bounce)
+                    float3 hitNormal = tex2Dlod(Kernel::sNormals, float4(sceneUV, 0, 0)).rgb;
+                    float facing = saturate(dot(hitNormal, -rayDir) * 4.0);
+                    float3 hitColor = GetLinearColor(sceneUV, false);
+                    float4 hitPrev = tex2Dlod(sFinalPoint, float4(sceneUV, 0, 0)); //last frame's final (blended over the frames)
+                    float3 hitIndirect = hitPrev.rgb * (saturate(1.0 - hitPrev.a) / max(AO_INTENSITY, 0.05));
+                    bounce = (EstimateDirectLighting(hitColor) + EstimateHitAlbedo(hitColor) * (hitIndirect * INFINITE_BOUNCE))
+                           * (occlusion * facing);
+                    break;
+                }
+            }
+
+            currentPos += rayDir * currentStepSize;
+            t += currentStepSize;
+        }
+    }
+    return 1.0 - saturate(occlusion * AO_INTENSITY);
+}
+
 /*--------------.
 | :: SHADERS :: |
 '--------------*/
 //nearest depth over 8x8 px
-float PS_HiZ8(VSOUT input) : SV_Target
+float4 PS_HiZ8(VSOUT input) : SV_Target
 {
     int2 first = int2(input.vpos.xy) * 8;
-    float minDepth = 1.0;
-    [unroll] for (int y = 0; y < 8; y++)
-        [unroll] for (int x = 0; x < 8; x++)
-            minDepth = min(minDepth, ReShade::GetLinearizedDepth((float2(first + int2(x, y)) + 0.5) * BUFFER_PIXEL_SIZE));
-    return minDepth;
+    float minDepth = 1.0, ringMin = 1.0, ringMax = 0.0;
+    [unroll] for (int y = -1; y <= 8; y++)
+        [unroll] for (int x = -1; x <= 8; x++)
+        {
+            int2 at = clamp(first + int2(x, y), 0, int2(BUFFER_WIDTH, BUFFER_HEIGHT) - 1);
+            float d = tex2Dfetch(Kernel::sDepth, at).r;
+            bool inner = x >= 0 && x < 8 && y >= 0 && y < 8;
+            minDepth = inner ? min(minDepth, d) : minDepth;
+            ringMin = min(ringMin, d); ringMax = max(ringMax, d);
+        }
+    return float4(minDepth, ringMin, ringMax, 0.0);
 }
 
 //4x4 of those
@@ -816,73 +900,6 @@ void PS_TexelGeo(VSOUT input, out float4 geo : SV_Target0)
     [flatten] if (depth1 < minDepth) { geo = geo1; minDepth = depth1; }
     [flatten] if (depth2 < minDepth) { geo = geo2; minDepth = depth2; }
     [flatten] if (depth3 < minDepth) { geo = geo3; }
-}
-float TraceRay(VSOUT input, float2 pixelUV, float4 gbuffer, out float3 bounce)
-{
-    float3 normal = gbuffer.rgb;
-    float depth = gbuffer.a;
-    float occlusion = 0.0;
-    bounce = 0.0;
-    [branch] if (!(depth == 0 || depth >= DEPTH_BOUNDARY))
-    {
-        float3 startPos = UVToViewSpace(pixelUV, depth, input);
-        float3 tangent, bitangent;
-        BuildOrthonormalBasis(normal, tangent, bitangent);
-        float2 noise = GetStratifiedNoise(input.vpos.xy);
-        float3 rayDir = GenerateHemisphereDirection(normal, noise, tangent, bitangent);
-        const float globalMaxDistance = 1.0;
-        float frustumDist = CalculateDistanceToFrustum(startPos, rayDir); //exact distance to screen edge, capped by global max
-        float totalRayLength = min(frustumDist, globalMaxDistance);
-        float stepSize = startPos.z * 0.005;
-        float t = stepSize * NEAR_STEP; //(near) first sample a quarter step out
-        float3 currentPos = startPos + rayDir * t;
-        [loop] for (int step = 0; step < 100; step++) {
-            if (t >= totalRayLength) break;
-
-            float2 hitPos = ViewSpaceToUV(currentPos, input);
-            if (IsOOB(hitPos)) break;
-
-            float HiZDepth = tex2Dlod(sHiZMip5, float4(hitPos, 0, 0)).r;
-            bool nearStep = step < NEAR_STEPS; //(near) the first steps finer
-            float currentStepSize = stepSize * (nearStep ? 2.5 * NEAR_STEP : 2.5);
-
-            //skip some empty space
-            if (currentPos.z < HiZDepth && (HiZDepth - currentPos.z) > currentStepSize) {
-                float leap = max(currentStepSize, (HiZDepth - currentPos.z) * 0.065);
-                currentPos += rayDir * leap;
-                t += leap;
-                continue;
-            }
-
-            //hit test
-            float sceneDepth = ReShade::GetLinearizedDepth(hitPos);
-            float depthDiff = currentPos.z - sceneDepth;
-            if (depthDiff > (currentPos.z * (nearStep ? 0.0025 : 0.005)) && depthDiff < (currentPos.z * 0.1)) {
-                float2 sceneUV = hitPos;
-                float3 scenePos = UVToViewSpace(sceneUV, sceneDepth, input);
-                float hitDistance = length(scenePos - startPos);
-                float normalizedDist = hitDistance / globalMaxDistance;
-                occlusion = saturate(1.0 - normalizedDist);
-                occlusion = occlusion * occlusion;
-                //(near) contact band
-                float nearFall = saturate(1.0 - hitDistance / (startPos.z * NEAR_RADIUS));
-                occlusion = saturate(occlusion + NEAR_BOOST * nearFall * nearFall);
-                //from faces turned toward the ray: hit's lit color, plus last frame's indirect light there (infinite bounce)
-                float3 hitNormal = tex2Dlod(Kernel::sNormals, float4(sceneUV, 0, 0)).rgb;
-                float facing = saturate(dot(hitNormal, -rayDir) * 4.0);
-                float3 hitColor = GetLinearColor(sceneUV, false);
-                float4 hitPrev = tex2Dlod(sFinalPoint, float4(sceneUV, 0, 0)); //last frame's final (blended over the frames)
-                float3 hitIndirect = hitPrev.rgb * (saturate(1.0 - hitPrev.a) / max(AO_INTENSITY, 0.05));
-                bounce = (EstimateDirectLighting(hitColor) + EstimateHitAlbedo(hitColor) * (hitIndirect * INFINITE_BOUNCE))
-                       * (occlusion * facing);
-                break;
-            }
-
-            currentPos += rayDir * currentStepSize;
-            t += currentStepSize;
-        }
-    }
-    return 1.0 - saturate(occlusion * AO_INTENSITY);
 }
 
 void PS_RayTracer(VSOUT input, out float4 aoOut : SV_Target0, out float4 giOut : SV_Target1)
@@ -937,7 +954,7 @@ void PS_RayTracer(VSOUT input, out float4 aoOut : SV_Target0, out float4 giOut :
     giOut = float4(lerp(bounce, prevGI.rgb, blendVal), lerp(bounceLuma * bounceLuma, prevGI.a, blendVal) + (1.0 - same) * 0.01);
 }
 
-//first level (step 2, on the acc. moments); also keeps this frame's acc. and depth for the next
+//first level (step 2, on the acc. moments); also keeps this frame's acc. & depth for the next
 void PS_ATrousPass1(VSOUT input, out float2 filtered : SV_Target0, out float4 history : SV_Target1,
                     out float4 giFiltered : SV_Target2, out float4 giHistory : SV_Target3, out float prevZ : SV_Target4)
 {
@@ -1109,19 +1126,19 @@ technique Lumenite_LSGI <
     ui_tooltip = "Large-Scale Ray Traced Global Illumination (Screen Space).";
 >
 {
-    pass { VertexShader = VS; PixelShader = PS_HiZ8;             RenderTarget  = tHiZ8; }
-    pass { VertexShader = VS; PixelShader = PS_HiZ32;            RenderTarget  = tHiZMip5; }
-    pass { VertexShader = VS; PixelShader = PS_TexelGeo;         RenderTarget  = tGeoHalf; }
+    pass { VertexShader = VS; PixelShader = PS_HiZ8;        RenderTarget  = tHiZ8; }
+    pass { VertexShader = VS; PixelShader = PS_HiZ32;       RenderTarget  = tHiZMip5; }
+    pass { VertexShader = VS; PixelShader = PS_TexelGeo;    RenderTarget  = tGeoHalf; }
 
-    pass { VertexShader = VS; PixelShader = PS_DepthDrift;       RenderTarget  = tDrift; }
-    pass { VertexShader = VS; PixelShader = PS_RayTracer;          RenderTarget0 = tAO1; RenderTarget1 = tGI1; }
-    pass { VertexShader = VS; PixelShader = PS_ATrousPass1;      RenderTarget0 = tAO2; RenderTarget1 = tPrevAO; RenderTarget2 = tGI2; RenderTarget3 = tPrevGI; RenderTarget4 = tPrevZ; }
-    pass { VertexShader = VS; PixelShader = PS_GIATrousA;        RenderTarget0 = tAO3; RenderTarget1 = tGI3; }
-    pass { VertexShader = VS; PixelShader = PS_GIATrousB;        RenderTarget0 = tAO2; RenderTarget1 = tGI4; }
-    pass { VertexShader = VS; PixelShader = PS_GIATrousC;        RenderTarget  = tGI3; }
-    pass { VertexShader = VS; PixelShader = PS_Final;            RenderTarget  = tFinal; }
-    pass { VertexShader = VS; PixelShader = PS_ToDisplay;                               }
-    pass { VertexShader = VS; PixelShader = PS_FinalKeep;        RenderTarget  = tFinalPrev; }
+    pass { VertexShader = VS; PixelShader = PS_DepthDrift;  RenderTarget  = tDrift; }
+    pass { VertexShader = VS; PixelShader = PS_RayTracer;   RenderTarget0 = tAO1; RenderTarget1 = tGI1; }
+    pass { VertexShader = VS; PixelShader = PS_ATrousPass1; RenderTarget0 = tAO2; RenderTarget1 = tPrevAO; RenderTarget2 = tGI2; RenderTarget3 = tPrevGI; RenderTarget4 = tPrevZ; }
+    pass { VertexShader = VS; PixelShader = PS_GIATrousA;   RenderTarget0 = tAO3; RenderTarget1 = tGI3; }
+    pass { VertexShader = VS; PixelShader = PS_GIATrousB;   RenderTarget0 = tAO2; RenderTarget1 = tGI4; }
+    pass { VertexShader = VS; PixelShader = PS_GIATrousC;   RenderTarget  = tGI3; }
+    pass { VertexShader = VS; PixelShader = PS_Final;       RenderTarget  = tFinal; }
+    pass { VertexShader = VS; PixelShader = PS_ToDisplay;                          }
+    pass { VertexShader = VS; PixelShader = PS_FinalKeep;   RenderTarget  = tFinalPrev; }
 }
 
 }
