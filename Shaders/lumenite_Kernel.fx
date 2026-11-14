@@ -17,7 +17,7 @@
 
 
         Filename   : lumenite_Kernel.fx
-        Version    : 2026.11.14
+        Version    : 2026.11.15
         Author     : Afzaal (Kaidō)
         Description: Pre-effect for various LumeniteFX shaders.
         License    : AGNYA License (https://github.com/nvb-uy/AGNYA-License)
@@ -492,49 +492,6 @@ float2 ATrousFilter(sampler2D motionSrc, float2 uv, uint dilation, uint mip)
     return sum / (totalWeight + EPSILON);
 }
 
-float2 UpscaleFlow(sampler2D coarseSrc, sampler2D currLumaSrc, sampler2D prevLumaSrc, float2 uv, float2 texelSize, uint mip)
-{
-    if(FRAME_COUNT == 0) return float2(0, 0);
-
-    float2 coarseTexelSize = rcp(float2(tex2Dsize(coarseSrc, 0)));
-    //pool candidates for tournament selection. order matters here
-    float2 candidates[10];
-    candidates[0]  = tex2D(coarseSrc, uv).xy ;
-    candidates[1]  = tex2D(coarseSrc, uv + float2(0, -coarseTexelSize.y)).xy ;
-    candidates[2]  = tex2D(coarseSrc, uv + float2(0,  coarseTexelSize.y)).xy ;
-    candidates[3]  = tex2D(coarseSrc, uv - float2(coarseTexelSize.x, 0)).xy ;
-    candidates[4]  = tex2D(coarseSrc, uv + float2(coarseTexelSize.x, 0)).xy ;
-    candidates[5]  = tex2D(coarseSrc, uv + float2(-coarseTexelSize.x, -coarseTexelSize.y)).xy ;
-    candidates[6]  = tex2D(coarseSrc, uv + float2( coarseTexelSize.x, -coarseTexelSize.y)).xy ;
-    candidates[7]  = tex2D(coarseSrc, uv + float2(-coarseTexelSize.x,  coarseTexelSize.y)).xy ;
-    candidates[8]  = tex2D(coarseSrc, uv + float2(coarseTexelSize.x, coarseTexelSize.y)).xy ;
-    candidates[9] = tex2D(sPrevFrameFlow, uv).xy;
-
-    float minCost = 1e6;
-    float2 prediction = candidates[0];
-    [loop] for (int i = 0; i < 10; i++) {
-        float cost = ZMSAD(currLumaSrc, prevLumaSrc, uv, uv + candidates[i], texelSize, mip);
-        if (cost < minCost) {
-            minCost = cost;
-            prediction = candidates[i];
-        }
-    }
-
-    //sub-pixel refinement w. parabolic fitting
-    float costLeft   = ZMSAD(currLumaSrc, prevLumaSrc, uv, uv + prediction - float2(texelSize.x, 0), texelSize, mip);
-    float costRight  = ZMSAD(currLumaSrc, prevLumaSrc, uv, uv + prediction + float2(texelSize.x, 0), texelSize, mip);
-    float costDown   = ZMSAD(currLumaSrc, prevLumaSrc, uv, uv + prediction - float2(0, texelSize.y), texelSize, mip);
-    float costUp     = ZMSAD(currLumaSrc, prevLumaSrc, uv, uv + prediction + float2(0, texelSize.y), texelSize, mip);
-    float2 curvature = max(float2(costLeft + costRight, costDown + costUp) - 2.0 * minCost, 0.01 * minCost);
-    float2 subpixelOffset = float2(costLeft - costRight, costDown - costUp) / (2.0 * curvature);
-    subpixelOffset = clamp(subpixelOffset, -0.5, 0.5); //clamp offset to a reasonable range
-
-    //keep the fit only where its match is better than tournament winner's
-    float2 refined = prediction + subpixelOffset * texelSize;
-    float  refinedCost = ZMSAD(currLumaSrc, prevLumaSrc, uv, uv + refined, texelSize, mip);
-    return (refinedCost < minCost) ? refined : prediction;
-}
-
 //Lucas-Kanade step
 static const float LK_SIGMA        = 2.0;       //txls: Gaussian window around the blk
 static const float LK_BORDER       = 2.0;       //txls at the frame's edge left out of the window
@@ -639,6 +596,38 @@ float2 LKStep(float2 uv, float2 texel, float lod, float2 flow, float2 anchor, fl
         position -= delta.x * axis + delta.y * axis2;
     }
     return position * texel;
+}
+
+float2 UpscaleFlow(sampler2D coarseSrc, sampler2D currLumaSrc, sampler2D prevLumaSrc, float2 uv, float2 texelSize, uint mip)
+{
+    if(FRAME_COUNT == 0) return float2(0, 0);
+
+    float2 coarseTexelSize = rcp(float2(tex2Dsize(coarseSrc, 0)));
+    //pool candidates for tournament selection. order matters here
+    float2 candidates[10];
+    candidates[0]  = tex2D(coarseSrc, uv).xy ;
+    candidates[1]  = tex2D(coarseSrc, uv + float2(0, -coarseTexelSize.y)).xy ;
+    candidates[2]  = tex2D(coarseSrc, uv + float2(0,  coarseTexelSize.y)).xy ;
+    candidates[3]  = tex2D(coarseSrc, uv - float2(coarseTexelSize.x, 0)).xy ;
+    candidates[4]  = tex2D(coarseSrc, uv + float2(coarseTexelSize.x, 0)).xy ;
+    candidates[5]  = tex2D(coarseSrc, uv + float2(-coarseTexelSize.x, -coarseTexelSize.y)).xy ;
+    candidates[6]  = tex2D(coarseSrc, uv + float2( coarseTexelSize.x, -coarseTexelSize.y)).xy ;
+    candidates[7]  = tex2D(coarseSrc, uv + float2(-coarseTexelSize.x,  coarseTexelSize.y)).xy ;
+    candidates[8]  = tex2D(coarseSrc, uv + float2(coarseTexelSize.x, coarseTexelSize.y)).xy ;
+    candidates[9]  = tex2D(sPrevFrameFlow, uv).xy;
+
+    float minCost = 1e6;
+    float2 prediction = candidates[0];
+    [loop] for (int i = 0; i < 10; i++) {
+        float cost = ZMSAD(currLumaSrc, prevLumaSrc, uv, uv + candidates[i], texelSize, mip);
+        if (cost < minCost) {
+            minCost = cost;
+            prediction = candidates[i];
+        }
+    }
+
+    //sub-pixel refinement w. Lucas-Kanade
+    return LKStep(uv, texelSize, mip, prediction, prediction, LK_PRIOR, 2);
 }
 }
 
@@ -1089,8 +1078,7 @@ float2 PS_MedianPass32(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Targ
 
 float2 PS_UpscaleFlow16(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 {
-    float2 flow = UpscaleFlow(sFlow32B, sCurrLuma, sPrevLuma, uv, BUFFER_PIXEL_SIZE*4.0, 2);
-    return LKStep(uv, BUFFER_PIXEL_SIZE * 4.0, 2.0, flow, flow, LK_PRIOR, 2);
+    return UpscaleFlow(sFlow32B, sCurrLuma, sPrevLuma, uv, BUFFER_PIXEL_SIZE*4.0, 2);
 }
 
 float2 PS_MedianPass16(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
