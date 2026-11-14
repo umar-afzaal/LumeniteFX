@@ -17,7 +17,7 @@
 
 
         Filename   : lumenite_PocketAO.fx
-        Version    : 2026.10.17
+        Version    : 2026.11.14
         Author     : Afzaal (Kaidō)
         Description: Superfast Ambient Occlusion (Screen Space).
         License    : AGNYA License (https://github.com/nvb-uy/AGNYA-License)
@@ -30,7 +30,6 @@
 '------------------*/
 #define FOV 60.0
 #define NEAR_PLANE 0.01
-#define AO_MAX_MARCH_STEPS 48
 
 /*--------------.
 | :: HEADERS :: |
@@ -75,6 +74,17 @@ uniform float AO_INTENSITY <
     ui_category = "Ambient Occlusion";
 > = 1.0;
 
+uniform float RAY_LENGTH <
+    ui_type = "drag";
+    ui_min = 0.1; ui_max = 1.0;
+    ui_label = "AO Radius";
+    ui_tooltip = "The max ray trace distance before termination.";
+    ui_category = "Ambient Occlusion";
+> = 0.7;
+
+//scale march step with raylen: 48 at my old 7m ref
+#define AO_MAX_MARCH_STEPS (max(1, int(ceil(RAY_LENGTH * 48.0 / 0.7))))
+
 /*--------------.
 | :: IMPORTS :: |
 '--------------*/
@@ -97,9 +107,6 @@ sampler sNormals { Texture = tNormals; };
 texture2D tDepth { Width = BUFFER_WIDTH / 2; Height = BUFFER_HEIGHT / 2; Format = R16F; };
 sampler2D sDepth { Texture = tDepth; };
 
-texture tAOTrace { Width = BUFFER_WIDTH / 2; Height = BUFFER_HEIGHT / 2; Format = R16F; };
-sampler sAOTrace { Texture = tAOTrace; AddressU = CLAMP; AddressV = CLAMP; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
-
 texture tAO1 { Width = BUFFER_WIDTH / 2; Height = BUFFER_HEIGHT / 2; Format = RG16F; };
 sampler sAO1 { Texture = tAO1; AddressU = CLAMP; AddressV = CLAMP; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
 
@@ -107,24 +114,15 @@ texture tAO2 { Width = BUFFER_WIDTH / 2; Height = BUFFER_HEIGHT / 2; Format = RG
 sampler sAO2 { Texture = tAO2; AddressU = CLAMP; AddressV = CLAMP; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
 
 texture tAO3 { Width = BUFFER_WIDTH / 2; Height = BUFFER_HEIGHT / 2; Format = RG16F; };
-sampler sAO3Linear { Texture = tAO3; AddressU = CLAMP; AddressV = CLAMP; MagFilter = LINEAR; MinFilter = LINEAR; };
+sampler sAO3 { Texture = tAO3; AddressU = CLAMP; AddressV = CLAMP; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; };
 
 texture tPrevAO { Width = BUFFER_WIDTH / 2; Height = BUFFER_HEIGHT / 2; Format = RG16F; };
 sampler sPrevAO { Texture = tPrevAO; AddressU = CLAMP; AddressV = CLAMP; MagFilter = LINEAR; MinFilter = LINEAR; MipFilter = LINEAR; };
 
-//HiZ mipchain
-texture tHiZMip0 { Width = BUFFER_WIDTH;    Height = BUFFER_HEIGHT;    Format = R16F; };
-texture tHiZMip1 { Width = BUFFER_WIDTH/2;  Height = BUFFER_HEIGHT/2;  Format = R16F; };
-texture tHiZMip2 { Width = BUFFER_WIDTH/4;  Height = BUFFER_HEIGHT/4;  Format = R16F; };
-texture tHiZMip3 { Width = BUFFER_WIDTH/8;  Height = BUFFER_HEIGHT/8;  Format = R16F; };
-texture tHiZMip4 { Width = BUFFER_WIDTH/16; Height = BUFFER_HEIGHT/16; Format = R16F; };
+//nearest depth over each 32x32 px blk
+texture tHiZ8    { Width = BUFFER_WIDTH/8;  Height = BUFFER_HEIGHT/8;  Format = R16F; };
 texture tHiZMip5 { Width = BUFFER_WIDTH/32; Height = BUFFER_HEIGHT/32; Format = R16F; };
-
-sampler sHiZMip0 { Texture = tHiZMip0; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; AddressU = CLAMP; AddressV = CLAMP; };
-sampler sHiZMip1 { Texture = tHiZMip1; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; AddressU = CLAMP; AddressV = CLAMP; };
-sampler sHiZMip2 { Texture = tHiZMip2; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; AddressU = CLAMP; AddressV = CLAMP; };
-sampler sHiZMip3 { Texture = tHiZMip3; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; AddressU = CLAMP; AddressV = CLAMP; };
-sampler sHiZMip4 { Texture = tHiZMip4; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; AddressU = CLAMP; AddressV = CLAMP; };
+sampler sHiZ8    { Texture = tHiZ8;    MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; AddressU = CLAMP; AddressV = CLAMP; };
 sampler sHiZMip5 { Texture = tHiZMip5; MagFilter = POINT; MinFilter = POINT; MipFilter = POINT; AddressU = CLAMP; AddressV = CLAMP; };
 
 /*--------------.
@@ -166,41 +164,95 @@ float CalculateDepthFade(float depth)
 float2 ATrousFilter(sampler SourceSampler, float2 uv, uint dilation, bool adaptiveDilation)
 {
     float4 gbuffer = tex2D(sNormals, uv);
-    if (gbuffer.a == 0 || gbuffer.a >= DEPTH_BOUNDARY) return float2(1.0, 0.0);
+    float2 result = float2(1.0, 0.0);
+    [branch] if (!(gbuffer.a == 0 || gbuffer.a >= DEPTH_BOUNDARY))
+    {
+        [branch] if (adaptiveDilation) {
+            float confidence = tex2Dlod(PocketMV::sConfidence, float4(uv, 0, 0)).r;
+            dilation += uint(round((1.0 - confidence) * 2.0)); //scale filter kernel w. motion by up to a factor of 2
+        }
 
-    [branch] if (adaptiveDilation) {
-        float confidence = tex2Dlod(PocketMV::sConfidence, float4(uv, 0, 0)).r;
-        dilation += uint(round((1.0 - confidence) * 2.0)); //scale filter kernel w. motion by up to a factor of 2
+        float2 centerData = tex2Dlod(SourceSampler, float4(uv, 0, 0)).rg;
+        float variance = max(0.0, centerData.g - (centerData.r * centerData.r)); //Moment - AO^2
+        variance = max(variance, 0.0001);
+        float2 sum = centerData;
+        float totalWeight = 1.0;
+        //the eight neighbors in the order the 3x3 loop visited them (the center left out)
+        static const float2 TAPS[8] = { float2(-1, -1), float2(0, -1), float2(1, -1), float2(-1, 0),
+                                        float2( 1,  0), float2(-1, 1), float2(0,  1), float2(1,  1) };
+        [unroll] for (int i = 0; i < 8; i++) {
+            float2 sampleUV    = uv + TAPS[i] * dilation * (BUFFER_PIXEL_SIZE * 2.0); //don't forget the x2.0 to properly step half-res grid!
+            float2 sampleData  = tex2Dlod(SourceSampler, float4(sampleUV, 0, 0)).rg;
+            float4 sampleGeo   = tex2Dlod(sNormals, float4(sampleUV, 0, 0));
+            float depthWeight  = exp(-abs(gbuffer.a - sampleGeo.a) / (gbuffer.a * 0.02 + 0.001));
+            float normalWeight = pow(saturate(dot(gbuffer.rgb, sampleGeo.rgb)), 50.0);
+            float aoDiff       = centerData.r - sampleData.r;
+            float aoWeight     = exp(-(aoDiff * aoDiff) / (variance + 0.0001));
+            float weight       = depthWeight * normalWeight * aoWeight;
+            sum += sampleData * weight;
+            totalWeight += weight;
+        }
+        result = sum / (totalWeight + EPSILON);
     }
-
-    float2 centerData = tex2Dlod(SourceSampler, float4(uv, 0, 0)).rg;
-    float variance = max(0.0, centerData.g - (centerData.r * centerData.r)); //Moment - AO^2
-    variance = max(variance, 0.0001);
-    float2 sum = centerData;
-    float totalWeight = 1.0;
-    for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
-        if (x == 0 && y == 0) continue;
-        float2 sampleUV    = uv + float2(x, y) * dilation * (BUFFER_PIXEL_SIZE * 2.0); //don't forget the x2.0 to properly step half-res grid!
-        float2 sampleData  = tex2Dlod(SourceSampler, float4(sampleUV, 0, 0)).rg;
-        float4 sampleGeo   = tex2Dlod(sNormals, float4(sampleUV, 0, 0));
-        float depthWeight  = exp(-abs(gbuffer.a - sampleGeo.a) / (gbuffer.a * 0.02 + 0.001));
-        float normalWeight = pow(saturate(dot(gbuffer.rgb, sampleGeo.rgb)), 50.0);
-        float aoDiff       = centerData.r - sampleData.r;
-        float aoWeight     = exp(-(aoDiff * aoDiff) / (variance + 0.0001));
-        float weight       = depthWeight * normalWeight * aoWeight;
-        sum += sampleData * weight;
-        totalWeight += weight;
-    }
-    return sum / (totalWeight + EPSILON);
+    return result;
 }
 
-float SamplePrevHiZ(float2 centerUV, sampler srcSampler, int srcMipLvl) {
-    float2 srcTexelSize = BUFFER_PIXEL_SIZE * pow(2, srcMipLvl);
-    float2 off[4] = { float2(-0.5, -0.5), float2(0.5, -0.5), float2(-0.5, 0.5), float2(0.5, 0.5) };
-    float minDepth = 1.0;
-    [unroll] for(int i=0; i<4; i++)
-        minDepth = min(minDepth, tex2D(srcSampler, centerUV + off[i] * srcTexelSize).r);
-    return minDepth;
+//1st hit's occlusion along one cos-weighted ray
+float TraceRay(VSOUT input)
+{
+    float4 gbuffer = tex2D(sNormals, input.uv);
+    float3 normal = gbuffer.rgb;
+    float depth = gbuffer.a;
+    float occlusion = 0.0;
+    [branch] if (!(depth == 0 || depth >= DEPTH_BOUNDARY))
+    {
+        float3 startPos = UVToViewSpace(input.uv, depth, input);
+        float3 tangent, bitangent;
+        BuildOrthonormalBasis(normal, tangent, bitangent);
+        float2 noise = GetStratifiedNoise(input.vpos.xy);
+        float3 rayDir = GenerateHemisphereDirection(normal, noise, tangent, bitangent);
+        float totalRayLength = RAY_LENGTH * depth;
+        float baseStepSize = totalRayLength / (float)AO_MAX_MARCH_STEPS;
+        float stepSize = baseStepSize;
+        startPos += normal * depth * 0.0005; //push ray slightly OUTWARD along the normal; clears staircase artifacts
+        float3 currentPos = startPos + rayDir * stepSize;
+        float t = stepSize;
+        [loop]
+        for (int step = 0; step < AO_MAX_MARCH_STEPS; step++) {
+            if (t >= totalRayLength) break;
+
+            float2 hitPos = ViewSpaceToUV(currentPos, input);
+            if (IsOOB(hitPos)) break;
+
+            float HiZDepth = tex2Dlod(sHiZMip5, float4(hitPos,0,0)).r;
+            //skip some empty space
+            float currentStepSize = stepSize * 2.5;
+            if (currentPos.z < HiZDepth && (HiZDepth - currentPos.z) > currentStepSize) {
+                float leap = max(currentStepSize, (HiZDepth - currentPos.z) * 0.065);
+                currentPos += rayDir * leap;
+                t += leap;
+                continue;
+            }
+
+            //hit test
+            float sceneDepth = tex2Dlod(sDepth, float4(hitPos, 0, 0)).r;
+            float depthDiff = currentPos.z - sceneDepth;
+            float maxThickness = currentPos.z * 0.6;
+            if (depthDiff > (currentPos.z * 0.0001) && depthDiff < maxThickness) {
+                float3 scenePos = UVToViewSpace(hitPos, sceneDepth, input);
+                float hitDistance = length(scenePos - startPos);
+                float normalizedDist = hitDistance / totalRayLength;
+                occlusion = 1.0 - saturate(depthDiff / maxThickness);
+                occlusion = occlusion * occlusion;
+                occlusion = saturate(pow(saturate(1.0 - normalizedDist), 1.2) * occlusion * 1.4);
+                break;
+            }
+
+            currentPos += rayDir * stepSize;
+            t += stepSize;
+        }
+    }
+    return 1.0 - saturate(occlusion * AO_INTENSITY);
 }
 
 /*--------------.
@@ -235,100 +287,35 @@ void PS_ReconstructNormals(VSOUT input, out float4 gbuffer : SV_Target0, out flo
     gbuffer = float4(geoNormal, depthC);
 }
 
-float PS_GenerateMip0(VSOUT input) : SV_Target
+//nearest depth over 8x8 px
+float PS_HiZ8(VSOUT input) : SV_Target
 {
-    float2 blockOriginUV = floor(input.uv / (BUFFER_PIXEL_SIZE * 2.0)) * (BUFFER_PIXEL_SIZE * 2.0);
-    float2 uvs[4] = { blockOriginUV + BUFFER_PIXEL_SIZE * float2(0.5, 0.5),
-                      blockOriginUV + BUFFER_PIXEL_SIZE * float2(1.5, 0.5),
-                      blockOriginUV + BUFFER_PIXEL_SIZE * float2(0.5, 1.5),
-                      blockOriginUV + BUFFER_PIXEL_SIZE * float2(1.5, 1.5) };
-    float d0 = tex2D(sDepth, uvs[0]).r;
-    float d1 = tex2D(sDepth, uvs[1]).r;
-    float d2 = tex2D(sDepth, uvs[2]).r;
-    float d3 = tex2D(sDepth, uvs[3]).r;
-    return min(min(d0, d1), min(d2, d3));
+    int2 first = int2(input.vpos.xy) * 4;
+    float minDepth = 1.0;
+    [unroll] for (int y = 0; y < 4; y++)
+        [unroll] for (int x = 0; x < 4; x++)
+            minDepth = min(minDepth, tex2Dfetch(sDepth, first + int2(x, y)).r);
+    return minDepth;
 }
 
-float PS_ReduceMip1  (VSOUT input) : SV_Target { return SamplePrevHiZ(input.uv, sHiZMip0, 0); }
-float PS_ReduceMip2  (VSOUT input) : SV_Target { return SamplePrevHiZ(input.uv, sHiZMip1, 1); }
-float PS_ReduceMip3  (VSOUT input) : SV_Target { return SamplePrevHiZ(input.uv, sHiZMip2, 2); }
-float PS_ReduceMip4  (VSOUT input) : SV_Target { return SamplePrevHiZ(input.uv, sHiZMip3, 3); }
-float PS_ReduceMip5  (VSOUT input) : SV_Target { return SamplePrevHiZ(input.uv, sHiZMip4, 4); }
-
-float PS_TraceAO(VSOUT input) : SV_Target
+//4x4 of those
+float PS_HiZ32(VSOUT input) : SV_Target
 {
-    float4 gbuffer = tex2D(sNormals, input.uv);
-    float3 normal = gbuffer.rgb;
-    float depth = gbuffer.a;
-    if (depth == 0 || depth >= DEPTH_BOUNDARY) discard;
-    float3 startPos = UVToViewSpace(input.uv, depth, input);
-    float3 tangent, bitangent;
-    BuildOrthonormalBasis(normal, tangent, bitangent);
-    float2 noise = GetStratifiedNoise(input.vpos.xy);
-    float3 rayDir = GenerateHemisphereDirection(normal, noise, tangent, bitangent);
-    float totalRayLength = 0.7 * depth;
-    float baseStepSize = totalRayLength / (float)AO_MAX_MARCH_STEPS;
-    float stepSize = baseStepSize;
-    float3 currentPos = startPos + rayDir * stepSize;
-    float occlusion = 0.0;
-    float t = stepSize;
-    [loop]
-    for (int step = 0; step < AO_MAX_MARCH_STEPS; step++) {
-        if (t >= totalRayLength) break;
-
-        float2 hitPos = ViewSpaceToUV(currentPos, input);
-        if (IsOOB(hitPos)) break;
-
-        //select the appropriate Mip Level
-        float2 ray_screen_velocity = abs(rayDir.xy / currentPos.z) * float2(BUFFER_WIDTH, BUFFER_HEIGHT);
-        float footprint = max(ray_screen_velocity.x, ray_screen_velocity.y) * max(stepSize / currentPos.z, 1.0);
-        int mip = clamp(int(log2(max(footprint, 1.0))), 0, 5);
-        float HiZDepth;
-        if      (mip==5) HiZDepth = tex2Dlod(sHiZMip5, float4(hitPos,0,0)).r;
-        else if (mip==4) HiZDepth = tex2Dlod(sHiZMip4, float4(hitPos,0,0)).r;
-        else if (mip==3) HiZDepth = tex2Dlod(sHiZMip3, float4(hitPos,0,0)).r;
-        else if (mip==2) HiZDepth = tex2Dlod(sHiZMip2, float4(hitPos,0,0)).r;
-        else if (mip==1) HiZDepth = tex2Dlod(sHiZMip1, float4(hitPos,0,0)).r;
-        else             HiZDepth = tex2Dlod(sHiZMip0, float4(hitPos,0,0)).r;
-
-        //skip some empty space
-        float currentStepSize = stepSize * max(1.0, float(mip) * 0.5); //stepsize mip scaling
-        if (currentPos.z < HiZDepth && (HiZDepth - currentPos.z) > currentStepSize) {
-            float leap = max(currentStepSize, (HiZDepth - currentPos.z) * 0.065);
-            currentPos += rayDir * leap;
-            t += leap;
-            continue;
-        }
-
-        //hit test
-        float sceneDepth = tex2Dlod(sDepth, float4(hitPos, 0, 0)).r;
-        float depthDiff = currentPos.z - sceneDepth;
-        float maxThickness = currentPos.z * 0.6;
-        if (depthDiff > (currentPos.z * 0.0001) && depthDiff < maxThickness) {
-            float3 scenePos = UVToViewSpace(hitPos, sceneDepth, input);
-            float hitDistance = length(scenePos - startPos);
-            float normalizedDist = hitDistance / totalRayLength;
-            occlusion = 1.0 - saturate(depthDiff / maxThickness);
-            occlusion = occlusion * occlusion;
-            occlusion = saturate(pow(saturate(1.0 - normalizedDist), 1.2) * occlusion * 1.4);
-            break;
-        }
-
-        currentPos += rayDir * stepSize;
-        t += stepSize;
-    }
-
-    float aoFactor = 1.0 - saturate(occlusion * AO_INTENSITY);
-    return aoFactor;
+    int2 first = int2(input.vpos.xy) * 4;
+    float minDepth = 1.0;
+    [unroll] for (int y = 0; y < 4; y++)
+        [unroll] for (int x = 0; x < 4; x++)
+            minDepth = min(minDepth, tex2Dfetch(sHiZ8, first + int2(x, y)).r);
+    return minDepth;
 }
 
-float2 PS_TemporalFilter(VSOUT input) : SV_Target
+float2 PS_RayTracer(VSOUT input) : SV_Target
 {
     float depth = tex2D(sDepth, input.uv).r;
     //overwrite noise at boundary with clean White, prevents gaps
     if (depth >= DEPTH_BOUNDARY) return float2(1.0, 1.0); //1.0 AO, 1.0 Moment
     if (depth == 0) discard;
-    float ao = tex2D(sAOTrace, input.uv).r;
+    float ao = TraceRay(input);
     ao = lerp(1.0, ao, CalculateDepthFade(depth));
     float moment = ao * ao;
     float2 flow = tex2D(PocketMV::sFlow, input.uv).xy;
@@ -345,24 +332,51 @@ float2 PS_TemporalFilter(VSOUT input) : SV_Target
     return float2(max(ao, 0.001), max(moment, 0.001));
 }
 
-float2 PS_StoreAO(VSOUT input) : SV_Target
+void PS_ATrousPass1(VSOUT input, out float2 filtered : SV_Target0, out float2 history : SV_Target1)
 {
-    //must prevent history collision here
-    //if we store exactly 0.0 (means White), the next frame's blend pass thinks
-    //history is empty and resets it, causing shimmer
-    //so clamp to 0.0001 so the system knows "This is valid history data"
+    filtered = ATrousFilter(sAO1, input.uv, 2, false);
     float2 data = tex2D(sAO1, input.uv).rg;
-    return float2(max(1.0 - data.r, 0.0001), max(1.0 - data.g, 0.0001)); //store inverted
+    history = float2(max(1.0 - data.r, 0.0001), max(1.0 - data.g, 0.0001));
 }
 
-float2 PS_ATrousPass1(VSOUT input) : SV_Target { return ATrousFilter(sAO1, input.uv, 2, false); }
-
-float2 PS_ATrousPass2(VSOUT input) : SV_Target { return ATrousFilter(sAO2, input.uv, 4, true); }
+float2 PS_ATrousPass2(VSOUT input) : SV_Target
+{
+    float ao = ATrousFilter(sAO2, input.uv, 4, true).r;
+    return float2(ao, tex2D(sDepth, input.uv).r);
+}
 
 float4 PS_ToDisplay(VSOUT input) : SV_Target
 {
-    float depth = tex2D(sDepth, input.uv).r;
-    float ao = tex2D(sAO3Linear, input.uv).r;
+    int2   pixel  = int2(input.vpos.xy);
+    float3 normal = tex2D(sNormals, input.uv).rgb;
+    float  depth  = GetDepth(input.uv);
+    float  ao     = 1.0;
+    [branch] if (!(depth == 0 || depth >= DEPTH_BOUNDARY))
+    {
+        float3 pointPos   = UVToViewSpace(input.uv, depth, input);
+        float  planeScale = 1.0 / (depth * 0.004);
+        float  depthScale = 1.0 / (depth * 0.02 + 0.0001);
+        float2 halfPos = (float2(pixel) + 0.5) * 0.5 - 0.5;
+        int2   base    = int2(floor(halfPos));
+        float2 f       = halfPos - float2(base);
+        float  aoSum = 0.0, weightSum = 0.0, nearest = 1.0, nearestDiff = 1e6;
+        [unroll] for (int y = 0; y <= 1; y++)
+        {
+            [unroll] for (int x = 0; x <= 1; x++)
+            {
+                int2   at       = clamp(base + int2(x, y), 0, int2(BUFFER_WIDTH / 2, BUFFER_HEIGHT / 2) - 1);
+                float2 tap      = tex2Dfetch(sAO3, at).rg;
+                float  diff     = abs(tap.g - depth);
+                float  bilinear = (x == 0 ? 1.0 - f.x : f.x) * (y == 0 ? 1.0 - f.y : f.y);
+                float3 texelPos = UVToViewSpace((float2(at) + 0.5) / float2(BUFFER_WIDTH / 2, BUFFER_HEIGHT / 2), tap.g, input);
+                float  w        = bilinear * exp(-diff * depthScale - abs(dot(texelPos - pointPos, normal)) * planeScale);
+                aoSum += tap.r * w; weightSum += w;
+                nearest     = diff < nearestDiff ? tap.r : nearest;
+                nearestDiff = min(diff, nearestDiff);
+            }
+        }
+        ao = weightSum > 0.001 ? aoSum / weightSum : nearest;
+    }
     if (DEBUG_VIEW) {
         #if BUFFER_COLOR_SPACE > 1
             return float4(ToOutputColorspace(ao.xxx, true), 1.0);
@@ -385,18 +399,12 @@ technique Lumenite_PocketAO <
 >
 {
     pass { VertexShader = VS; PixelShader = PS_ReconstructNormals; RenderTarget0 = tNormals; RenderTarget1 = tDepth; }
-    pass { VertexShader = VS; PixelShader = PS_GenerateMip0;       RenderTarget = tHiZMip0;                          }
-    pass { VertexShader = VS; PixelShader = PS_ReduceMip1;         RenderTarget = tHiZMip1;                          }
-    pass { VertexShader = VS; PixelShader = PS_ReduceMip2;         RenderTarget = tHiZMip2;                          }
-    pass { VertexShader = VS; PixelShader = PS_ReduceMip3;         RenderTarget = tHiZMip3;                          }
-    pass { VertexShader = VS; PixelShader = PS_ReduceMip4;         RenderTarget = tHiZMip4;                          }
-    pass { VertexShader = VS; PixelShader = PS_ReduceMip5;         RenderTarget = tHiZMip5;                          }
+    pass { VertexShader = VS; PixelShader = PS_HiZ8;               RenderTarget  = tHiZ8;                            }
+    pass { VertexShader = VS; PixelShader = PS_HiZ32;              RenderTarget  = tHiZMip5;                         }
 
-    pass { VertexShader = VS; PixelShader = PS_TraceAO;            RenderTarget = tAOTrace;                          }
-    pass { VertexShader = VS; PixelShader = PS_TemporalFilter;     RenderTarget = tAO1;                              }
-    pass { VertexShader = VS; PixelShader = PS_StoreAO;            RenderTarget = tPrevAO;                           }
-    pass { VertexShader = VS; PixelShader = PS_ATrousPass1;        RenderTarget = tAO2;                              }
-    pass { VertexShader = VS; PixelShader = PS_ATrousPass2;        RenderTarget = tAO3;                              }
+    pass { VertexShader = VS; PixelShader = PS_RayTracer;          RenderTarget  = tAO1;                             }
+    pass { VertexShader = VS; PixelShader = PS_ATrousPass1;        RenderTarget0 = tAO2; RenderTarget1 = tPrevAO;    }
+    pass { VertexShader = VS; PixelShader = PS_ATrousPass2;        RenderTarget  = tAO3;                             }
     pass { VertexShader = VS; PixelShader = PS_ToDisplay;                                                            }
 }
 

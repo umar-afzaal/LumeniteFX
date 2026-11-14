@@ -240,8 +240,8 @@ float TraceRay(VSOUT input)
         float totalRayLength = RAY_LENGTH * depth;
         float baseStepSize = totalRayLength / (float)AO_MAX_MARCH_STEPS;
         float stepSize = baseStepSize;
-        float3 currentPos = startPos + rayDir * stepSize;
         startPos += normal * depth * 0.0005; //push ray slightly OUTWARD along the normal; clears staircase artifacts
+        float3 currentPos = startPos + rayDir * stepSize;
         float t = stepSize;
         [loop]
         for (int step = 0; step < AO_MAX_MARCH_STEPS; step++) {

@@ -17,7 +17,7 @@
 
 
         Filename   : lumenite_Kernel.fx
-        Version    : 2026.10.17
+        Version    : 2026.11.14
         Author     : Afzaal (Kaidō)
         Description: Pre-effect for various LumeniteFX shaders.
         License    : AGNYA License (https://github.com/nvb-uy/AGNYA-License)
@@ -520,7 +520,7 @@ float2 UpscaleFlow(sampler2D coarseSrc, sampler2D currLumaSrc, sampler2D prevLum
         }
     }
 
-    //sub-pixel refinement with parabolic fitting
+    //sub-pixel refinement w. parabolic fitting
     float costLeft   = ZMSAD(currLumaSrc, prevLumaSrc, uv, uv + prediction - float2(texelSize.x, 0), texelSize, mip);
     float costRight  = ZMSAD(currLumaSrc, prevLumaSrc, uv, uv + prediction + float2(texelSize.x, 0), texelSize, mip);
     float costDown   = ZMSAD(currLumaSrc, prevLumaSrc, uv, uv + prediction - float2(0, texelSize.y), texelSize, mip);
@@ -529,10 +529,116 @@ float2 UpscaleFlow(sampler2D coarseSrc, sampler2D currLumaSrc, sampler2D prevLum
     float2 subpixelOffset = float2(costLeft - costRight, costDown - costUp) / (2.0 * curvature);
     subpixelOffset = clamp(subpixelOffset, -0.5, 0.5); //clamp offset to a reasonable range
 
-    //keep the fit only where its match is better than the tournament winner's
+    //keep the fit only where its match is better than tournament winner's
     float2 refined = prediction + subpixelOffset * texelSize;
     float  refinedCost = ZMSAD(currLumaSrc, prevLumaSrc, uv, uv + refined, texelSize, mip);
     return (refinedCost < minCost) ? refined : prediction;
+}
+
+//Lucas-Kanade step
+static const float LK_SIGMA        = 2.0;       //txls: Gaussian window around the blk
+static const float LK_BORDER       = 2.0;       //txls at the frame's edge left out of the window
+static const float LK_PRIOR        = 0.02;      //prior weight relative to the strongest eigenvalue
+static const float LK_FLOOR        = 0.0000007; //prior's floor
+
+float LKInsideAxis(float coordinate, float margin)
+{
+    return abs(coordinate - 0.5) <= 0.5 - margin ? 1.0 : 0.0;
+}
+
+float2 LKEigen(float3 m, out float2 axis)
+{
+    float halfSum = 0.5 * (m.x + m.y);
+    float radius  = sqrt(0.25 * (m.x - m.y) * (m.x - m.y) + m.z * m.z);
+    float across  = m.x - m.y;
+    float angle   = 0.5 * atan2(2.0 * m.z, (across == 0.0 && m.z == 0.0) ? 1.0 : across); //atan2(0, 0) is undefined
+    axis = float2(cos(angle), sin(angle));
+    return float2(halfSum + radius, halfSum - radius);
+}
+
+float2 LKStep(float2 uv, float2 texel, float lod, float2 flow, float2 anchor, float priorWeight, int iterations)
+{
+    static const int window = 6;
+    static const int size   = 8;
+    float  middle = 0.5 * float(window + 1); //blk center, in txls frm the template's first sample
+    float2 texels = flow / texel;
+    float2 shift  = -0.5 * (texels - round(texels)) * texel; //half phase
+    float  values[64];
+    [unroll] for (int k = 0; k < 64; k++)
+        values[k] = tex2Dlod(sCurrLuma, float4(uv + shift + (float2(k % size, k / size) - 0.5 * float(size - 1)) * texel, 0, lod)).r;
+
+    //window weights
+    float sampleWeight[36];
+    [unroll] for (int j = 1; j <= window; j++)
+    {
+        [unroll] for (int i = 1; i <= window; i++)
+        {
+            float2 offset = float2(i, j) - middle;
+            float2 at     = uv + shift + offset * texel;
+            sampleWeight[(j - 1) * window + i - 1] = exp(-dot(offset, offset) / (2.0 * LK_SIGMA * LK_SIGMA))
+                                                   * LKInsideAxis(at.x, texel.x * LK_BORDER) * LKInsideAxis(at.y, texel.y * LK_BORDER);
+        }
+    }
+
+    //Hessian of the inverse-compositional step
+    float  weightSum    = 0.0;
+    float2 gradientMean = 0.0;
+    float3 tensor       = 0.0;
+    [unroll] for (int j = 1; j <= window; j++)
+    {
+        [unroll] for (int i = 1; i <= window; i++)
+        {
+            float  weight   = sampleWeight[(j - 1) * window + i - 1];
+            float2 gradient = 0.5 * float2(values[j * size + i + 1] - values[j * size + i - 1], values[(j + 1) * size + i] - values[(j - 1) * size + i]);
+            weightSum    += weight;
+            gradientMean += weight * gradient;
+            tensor       += weight * float3(gradient * gradient, gradient.x * gradient.y);
+        }
+    }
+    weightSum     = max(weightSum, 1e-6);
+    gradientMean /= weightSum;
+    tensor = tensor / weightSum - float3(gradientMean * gradientMean, gradientMean.x * gradientMean.y);
+    float2 axis;
+    float2 strength  = max(LKEigen(tensor, axis), 0.0);
+    float2 axis2     = float2(-axis.y, axis.x);
+    float  prior     = priorWeight * strength.x + LK_FLOOR;
+    float2 dataShare = strength / (strength + prior);
+
+    float2 position = flow / texel;
+    float2 target   = anchor / texel;
+    [loop] for (int n = 0; n < iterations; n++)
+    {
+        //prev frame's cols and rows inside the frame at this pos
+        float insideX[6], insideY[6];
+        [unroll] for (int k = 1; k <= window; k++)
+        {
+            float2 at = uv + shift + (position + (float(k) - middle)) * texel;
+            insideX[k - 1] = LKInsideAxis(at.x, texel.x * LK_BORDER);
+            insideY[k - 1] = LKInsideAxis(at.y, texel.y * LK_BORDER);
+        }
+        float2 slope     = 0.0;
+        float  sampleSum = 0.0;
+        [unroll] for (int j = 1; j <= window; j++)
+        {
+            [unroll] for (int i = 1; i <= window; i++)
+            {
+                float2 offset   = float2(i, j) - middle;
+                float2 prevUV   = uv + shift + (position + offset) * texel;
+                float  weight   = sampleWeight[(j - 1) * window + i - 1] * insideX[i - 1] * insideY[j - 1];
+                float2 gradient = 0.5 * float2(values[j * size + i + 1] - values[j * size + i - 1], values[(j + 1) * size + i] - values[(j - 1) * size + i]) - gradientMean;
+                float  error    = tex2Dlod(sPrevLuma, float4(prevUV, 0, lod)).r - values[j * size + i];
+                slope     += weight * gradient * error;
+                sampleSum += weight;
+            }
+        }
+        //per eigen-direction: the Gauss-Newton step
+        slope /= max(sampleSum, 1e-6);
+        float2 dataStep  = clamp(float2(dot(slope, axis), dot(slope, axis2)) / max(strength, 1e-12), -1.0, 1.0);
+        float2 priorStep = float2(dot(position - target, axis), dot(position - target, axis2));
+        float2 delta     = lerp(priorStep, dataStep, dataShare);
+        position -= delta.x * axis + delta.y * axis2;
+    }
+    return position * texel;
 }
 }
 
@@ -717,7 +823,7 @@ namespace Normals {
                 float  normalAlign  = saturate(dot(centerGeo.rgb, sampleGeo.rgb));
                 float  normalWeight = saturate(normalAlign * tapWindow - (tapWindow - 1.0)); //angular window
                 float  weight       = depthWeight * normalWeight * 2.0; //uniform arm weight
-                weight              = sampleGeo.a >= 0.999 ? 0.0 : weight; //skip skylines
+                weight              = sampleGeo.a >= 0.999 ? 0.0 : weight;
                 armSum             += sampleGeo.rgb * weight;
                 armWeight          += weight;
             }
@@ -738,7 +844,7 @@ namespace Normals {
             float  mergeStrength = max(coherenceGate, curvGate);
             float3 filtered      = normalize(lerp(centerGeo.rgb, mergedDir, mergeStrength));
 
-            return float4(filtered, centerGeo.a); //depth rides through untouched
+            return float4(filtered, centerGeo.a); //depth rides untouched
         }
 
     #endif
@@ -983,7 +1089,8 @@ float2 PS_MedianPass32(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Targ
 
 float2 PS_UpscaleFlow16(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 {
-    return UpscaleFlow(sFlow32B, sCurrLuma, sPrevLuma, uv, BUFFER_PIXEL_SIZE*4.0, 2);
+    float2 flow = UpscaleFlow(sFlow32B, sCurrLuma, sPrevLuma, uv, BUFFER_PIXEL_SIZE*4.0, 2);
+    return LKStep(uv, BUFFER_PIXEL_SIZE * 4.0, 2.0, flow, flow, LK_PRIOR, 2);
 }
 
 float2 PS_MedianPass16(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
